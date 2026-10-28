@@ -1,0 +1,6 @@
+{
+  "name": "Singaporean Bridge",
+  "description": "4-player online Singaporean (Floating) Bridge with robust real-time rooms, bidding, partner calling, and mahjong-table felt aesthetics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

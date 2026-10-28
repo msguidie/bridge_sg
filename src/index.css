@@ -1,0 +1,94 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    --font-display: 'Fraunces', Georgia, serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  * {
+    box-sizing: border-box;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  html,
+  body,
+  #root {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    font-family: var(--font-sans);
+    color: #f3efe6;
+    background-color: #07261c;
+  }
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
+
+.font-mono-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Classic deep-green textured Mahjong / Bridge baize felt table */
+.mahjong-felt-bg {
+  background-color: #0b3829;
+  background-image:
+    radial-gradient(ellipse at 50% 45%, rgba(26, 107, 78, 0.52) 0%, rgba(11, 56, 41, 0.88) 58%, rgba(5, 29, 21, 0.98) 100%),
+    repeating-linear-gradient(
+      45deg,
+      rgba(255, 255, 255, 0.014) 0px,
+      rgba(255, 255, 255, 0.014) 1px,
+      transparent 1px,
+      transparent 3px
+    ),
+    repeating-linear-gradient(
+      -45deg,
+      rgba(0, 0, 0, 0.06) 0px,
+      rgba(0, 0, 0, 0.06) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+}
+
+/* Rosewood & Antique Brass Mahjong Table Frame */
+.mahjong-table-frame {
+  box-shadow:
+    inset 0 0 0 4px #2a1810,
+    inset 0 0 0 5px rgba(212, 175, 55, 0.35),
+    inset 0 0 48px rgba(0, 0, 0, 0.55);
+}
+
+/* Tactile ivory playing card surface */
+.playing-card-surface {
+  background: linear-gradient(165deg, #ffffff 0%, #faf7f0 65%, #f2ece1 100%);
+  box-shadow:
+    0 4px 10px rgba(0, 0, 0, 0.42),
+    0 1px 2px rgba(0, 0, 0, 0.28),
+    inset 0 0 0 1px rgba(180, 168, 148, 0.45);
+}
+
+.playing-card-winning {
+  box-shadow:
+    0 0 0 2.5px #eab308,
+    0 8px 20px rgba(234, 179, 8, 0.45),
+    0 4px 10px rgba(0, 0, 0, 0.5);
+}
+
+.game-shell {
+  width: 100vw;
+  height: 100vh;
+}
+
+@supports (height: 100dvh) {
+  .game-shell {
+    height: 100dvh;
+  }
+}
