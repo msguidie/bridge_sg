@@ -16,6 +16,14 @@ export default function App() {
         <div className="fixed top-0 left-0 right-0 bg-amber-600/95 text-white text-center py-1 text-xs z-50 shadow-sm flex items-center justify-center gap-2">
           <span className="animate-spin h-3 w-3 border-2 border-white border-t-transparent rounded-full" />
           Reconnecting{reconnectAttempts > 0 ? ` (attempt ${reconnectAttempts})` : ''}...
+          {reconnectAttempts >= 4 && (
+            <button
+              onClick={() => window.location.reload()}
+              className="px-2.5 py-0.5 bg-white/20 hover:bg-white/30 rounded text-[11px] font-medium transition cursor-pointer"
+            >
+              Refresh
+            </button>
+          )}
         </div>
       )}
       {connectionStatus === 'error' && (
@@ -36,7 +44,7 @@ export default function App() {
         </div>
       )}
 
-      <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[60] flex flex-col items-center gap-1.5 pointer-events-none">
+      <div className="fixed top-[calc(env(safe-area-inset-top)+1.5rem)] left-1/2 -translate-x-1/2 z-[60] flex flex-col items-center gap-1.5 pointer-events-none">
         <AnimatePresence>
           {toasts.map(toast => (
             <motion.div

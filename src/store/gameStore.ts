@@ -26,6 +26,42 @@ interface LobbyResponse {
   error?: string;
 }
 
+interface LoginResponse {
+  ok?: boolean;
+  success?: boolean;
+  account?: Account;
+  inGame?: boolean;
+  error?: string;
+}
+
+// The username survives reloads (iOS often reloads a backgrounded tab) so a
+// player lands back at the table without logging in again. The per-tab flag
+// remembers whether this tab was in the lobby or a game.
+const USERNAME_KEY = 'sgb.username';
+const SEATED_KEY = 'sgb.seated';
+
+function readStorage(store: () => Storage, key: string): string | null {
+  try {
+    return store().getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStorage(store: () => Storage, key: string, value: string | null) {
+  try {
+    if (value === null) store().removeItem(key);
+    else store().setItem(key, value);
+  } catch {
+    // Private mode or blocked storage: resuming just falls back to manual login.
+  }
+}
+
+export const savedUsername = () => readStorage(() => localStorage, USERNAME_KEY);
+const rememberUser = (name: string | null) => writeStorage(() => localStorage, USERNAME_KEY, name);
+const wasSeated = () => readStorage(() => sessionStorage, SEATED_KEY) === '1';
+const setSeated = (on: boolean) => writeStorage(() => sessionStorage, SEATED_KEY, on ? '1' : null);
+
 interface GameStore {
   appPhase: AppPhase;
   connectionStatus: ConnectionStatus;
@@ -39,7 +75,6 @@ interface GameStore {
   gameState: GameState | null;
   lastActionResult: ActionResult | null;
   reconnectAttempts: number;
-  disconnectedPlayers: Set<string>;
   toasts: Toast[];
 
   // ── Replays ──
@@ -52,6 +87,8 @@ interface GameStore {
 
   connectToServer: () => Promise<void>;
   login: (username: string) => Promise<boolean>;
+  resumeSession: () => Promise<boolean>;
+  switchAccount: () => void;
   refreshMyAccount: () => Promise<void>;
   enterLobby: () => void;
   leaveLobby: () => void;
@@ -62,7 +99,6 @@ interface GameStore {
   returnToLobby: () => void;
   quitRoom: () => void;
   resign: () => void;
-  disconnect: () => void;
   addToast: (message: string, type?: Toast['type']) => void;
   removeToast: (id: string) => void;
 
@@ -74,16 +110,9 @@ interface GameStore {
 }
 
 const useGameStore = create<GameStore>((set, get) => {
-  let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-  let enterLobbyTimer: ReturnType<typeof setTimeout> | null = null;
   let replayListRequest = 0;
   let replayRequest = 0;
-
-  function clearEnterLobbyTimer() {
-    if (enterLobbyTimer === null) return;
-    clearTimeout(enterLobbyTimer);
-    enterLobbyTimer = null;
-  }
+  let lastRelogin = 0;
 
   function showToast(message: string, type: Toast['type'] = 'info') {
     const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
@@ -101,10 +130,35 @@ const useGameStore = create<GameStore>((set, get) => {
     });
   }
 
-  function handleLobbyResponse(result: LobbyResponse) {
-    clearEnterLobbyTimer();
+  // Requests are not queued while offline: socket.io would replay them before
+  // we have logged in again. The player is told instead.
+  function liveSocket(): Socket | null {
+    const { socket } = get();
+    if (socket?.connected) return socket;
+    showToast('Connection lost, reconnecting...', 'warn');
+    return null;
+  }
+
+  // Whether this tab should be back in the lobby/game after a reconnect.
+  function seatedIntent() {
+    const { appPhase, gameState } = get();
+    if (appPhase === 'GAME' && gameState?.phase === 'GAME_OVER') return false; // keep the result screen
+    return appPhase === 'GAME' || appPhase === 'WAITING_ROOM' || wasSeated();
+  }
+
+  function handleLobbyResponse(result?: LobbyResponse) {
     if (result?.action === 'rejoin_game') return;
+    const account = get().myAccount;
+    if (result?.action === 'error' && result.error === 'Login required' && account) {
+      // The server restarted and forgot this socket: log in again (once, not in a loop).
+      if (Date.now() - lastRelogin > 5000) {
+        lastRelogin = Date.now();
+        void identify(account.username, true);
+        return;
+      }
+    }
     if (result?.action === 'lobby_full' || result?.action === 'error') {
+      setSeated(false);
       showToast(result.error || 'Unable to enter the lobby', 'warn');
       set({ appPhase: 'LOGIN', connectionStatus: 'connected' });
       return;
@@ -113,11 +167,57 @@ const useGameStore = create<GameStore>((set, get) => {
     set({ appPhase: 'WAITING_ROOM', connectionStatus: 'in_lobby' });
   }
 
-  function setupSocket(socket: Socket) {
+  function requestLogin(socket: Socket, username: string): Promise<LoginResponse | null> {
+    return new Promise(resolve => {
+      socket
+        .timeout(CONNECTION_CONFIG.ACK_TIMEOUT)
+        .emit('login', { username }, (err: Error | null, res: LoginResponse) => resolve(err ? null : res));
+    });
+  }
+
+  // Logs in as `username` (after every reconnect too) and, when asked to or
+  // when the server says we have a game running, goes back to the lobby/table.
+  async function identify(username: string, enterAfter: boolean): Promise<boolean> {
+    const { socket } = get();
+    if (!socket?.connected) return false;
+    const res = await requestLogin(socket, username);
+    if (!res) return false; // no answer; the next reconnect tries again
+    if (!(res.ok || res.success) || !res.account) {
+      if (res.error === 'Account not found') {
+        rememberUser(null);
+        setSeated(false);
+        set({ myAccount: null, appPhase: 'LOGIN', gameState: null, roomId: null });
+        showToast(`Account "${username}" no longer exists. Please create it again.`, 'warn');
+      }
+      return false;
+    }
+    set({ myAccount: res.account });
+    rememberUser(res.account.username);
+    if (res.inGame || enterAfter) get().enterLobby();
+    return true;
+  }
+
+  function bindSocket(socket: Socket) {
+    socket.on('connect', () => {
+      const { appPhase, myAccount } = get();
+      set({
+        connectionStatus: appPhase === 'WAITING_ROOM' ? 'in_lobby' : 'connected',
+        reconnectAttempts: 0,
+      });
+      if (myAccount) void identify(myAccount.username, seatedIntent());
+    });
+
+    socket.on('disconnect', (reason: string) => {
+      if (reason === 'io client disconnect') return;
+      set({ connectionStatus: 'reconnecting' });
+      if (reason === 'io server disconnect') socket.connect(); // socket.io does not retry this one
+    });
+
+    socket.io.on('reconnect_attempt', (attempt: number) => set({ reconnectAttempts: attempt }));
+
     socket.on('lobby_update', (lobbyState: LobbyState) => {
       applyLobbyState(lobbyState);
       if (get().appPhase === 'LOGIN' && get().connectionStatus === 'entering_lobby') {
-        clearEnterLobbyTimer();
         set({ appPhase: 'WAITING_ROOM', connectionStatus: 'in_lobby' });
       }
     });
@@ -131,14 +231,13 @@ const useGameStore = create<GameStore>((set, get) => {
         state: GameState;
         isReconnect?: boolean;
       }) => {
-        clearEnterLobbyTimer();
+        setSeated(true);
         const idx = data.seatIndex ?? data.playerIndex ?? 0;
         set({
           appPhase: 'GAME',
           roomId: data.roomId,
           playerIndex: idx,
           gameState: data.state,
-          disconnectedPlayers: new Set(),
           connectionStatus: 'connected',
           reconnectAttempts: 0,
         });
@@ -147,15 +246,16 @@ const useGameStore = create<GameStore>((set, get) => {
 
     socket.on(
       'game_state_update',
-      (data: { state: GameState; lastAction?: ActionResult }) => {
-        if (data?.state) {
-          set({
-            gameState: data.state,
-            ...(data.lastAction ? { lastActionResult: data.lastAction } : {}),
-          });
-          if (data.state.phase === 'GAME_OVER') {
-            void get().refreshMyAccount();
-          }
+      (data: { roomId?: string; state: GameState; lastAction?: ActionResult }) => {
+        if (!data?.state) return;
+        const { roomId } = get();
+        if (data.roomId && roomId && data.roomId !== roomId) return; // an older table
+        set({
+          gameState: data.state,
+          ...(data.lastAction ? { lastActionResult: data.lastAction } : {}),
+        });
+        if (data.state.phase === 'GAME_OVER') {
+          void get().refreshMyAccount();
         }
       },
     );
@@ -165,80 +265,42 @@ const useGameStore = create<GameStore>((set, get) => {
     });
 
     socket.on('player_disconnected', ({ username }: { username: string }) => {
-      set(s => ({ disconnectedPlayers: new Set([...s.disconnectedPlayers, username]) }));
       showToast(`${username} disconnected`, 'warn');
     });
 
     socket.on('player_reconnected', ({ username }: { username: string }) => {
-      set(s => {
-        const dp = new Set(s.disconnectedPlayers);
-        dp.delete(username);
-        return { disconnectedPlayers: dp };
-      });
       showToast(`${username} reconnected`, 'info');
     });
 
     socket.on('room_closed', (data?: { reason?: string }) => {
       showToast(data?.reason || 'Room closed', 'warn');
-      set({
-        gameState: null,
-        roomId: null,
-        disconnectedPlayers: new Set(),
-      });
-      const sock = get().socket;
-      if (sock && sock.connected) {
-        sock.emit('enter_lobby', (result: LobbyResponse) => handleLobbyResponse(result));
-      } else {
-        set({ appPhase: 'LOGIN' });
-      }
+      set({ gameState: null, roomId: null });
+      get().enterLobby();
     });
-
-    socket.on('disconnect', (reason: string) => {
-      if (reason === 'io client disconnect') return;
-      if (get().appPhase === 'GAME') {
-        set({ connectionStatus: 'reconnecting' });
-        attemptReconnect();
-      } else {
-        set({ connectionStatus: 'disconnected' });
-      }
-    });
-
-    socket.on('pong_keep_alive', () => {});
   }
 
-  function attemptReconnect() {
-    const currentAttempts = get().reconnectAttempts;
-    const myAccount = get().myAccount;
-    if (currentAttempts >= CONNECTION_CONFIG.MAX_RECONNECT_ATTEMPTS) {
-      set({ connectionStatus: 'error' });
-      showToast('Reconnection failed. Please refresh.', 'error');
+  // Back from the background or the network came back: retry now instead of
+  // waiting out the backoff, and catch half-open connections after a sleep.
+  function probeConnection() {
+    const { socket } = get();
+    if (!socket) return;
+    if (!socket.connected) {
+      set({ connectionStatus: 'reconnecting' });
+      socket.disconnect().connect();
       return;
     }
-    const delay = Math.min(
-      CONNECTION_CONFIG.RECONNECT_DELAY_BASE * Math.pow(2, currentAttempts),
-      CONNECTION_CONFIG.RECONNECT_DELAY_MAX,
-    );
-    setTimeout(async () => {
-      set({ reconnectAttempts: currentAttempts + 1 });
-      try {
-        await get().connectToServer();
-        const socket = get().socket;
-        if (socket && myAccount) {
-          socket.emit('login', { username: myAccount.username }, () => {
-            socket.emit('enter_lobby', (result: LobbyResponse) => {
-              if (result?.action === 'rejoin_game') {
-                set({ connectionStatus: 'connected', reconnectAttempts: 0 });
-                showToast('Reconnected to table!', 'info');
-              } else {
-                handleLobbyResponse(result);
-              }
-            });
-          });
-        }
-      } catch {
-        attemptReconnect();
-      }
-    }, delay);
+    socket.timeout(CONNECTION_CONFIG.PROBE_TIMEOUT).emit('ping_check', (err: Error | null) => {
+      if (!err) return;
+      set({ connectionStatus: 'reconnecting' });
+      socket.disconnect().connect();
+    });
+  }
+
+  if (typeof window !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') probeConnection();
+    });
+    window.addEventListener('online', probeConnection);
   }
 
   return {
@@ -253,7 +315,6 @@ const useGameStore = create<GameStore>((set, get) => {
     gameState: null,
     lastActionResult: null,
     reconnectAttempts: 0,
-    disconnectedPlayers: new Set(),
     toasts: [],
     replayList: [],
     replayListLoading: false,
@@ -262,83 +323,53 @@ const useGameStore = create<GameStore>((set, get) => {
     replayLoading: false,
     replayError: null,
 
-    connectToServer: async () => {
-      const existingSocket = get().socket;
-      if (existingSocket) {
-        existingSocket.removeAllListeners();
-        existingSocket.disconnect();
-      }
-      if (heartbeatInterval) clearInterval(heartbeatInterval);
-      set({ connectionStatus: 'connecting' });
-
+    // One socket for the whole session; socket.io keeps reconnecting it with
+    // backoff and the 'connect' handler logs back in each time.
+    connectToServer: () => {
+      const existing = get().socket;
+      if (existing?.connected) return Promise.resolve();
       return new Promise<void>((resolve, reject) => {
-        const socket = io(SERVER_URL, {
-          transports: ['websocket', 'polling'],
-          timeout: CONNECTION_CONFIG.CONNECTION_TIMEOUT,
-          reconnection: false,
-          forceNew: true,
-        });
-
-        const connectTimeout = setTimeout(() => {
-          socket.disconnect();
-          set({ connectionStatus: 'error' });
+        const socket =
+          existing ??
+          io(SERVER_URL, {
+            transports: ['websocket', 'polling'],
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            timeout: 20000,
+          });
+        if (!existing) {
+          bindSocket(socket);
+          set({ socket });
+        }
+        set({ connectionStatus: 'connecting' });
+        const onConnect = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          socket.off('connect', onConnect);
+          if (!socket.connected) set({ connectionStatus: 'error' });
           reject(new Error('Connection timeout'));
         }, CONNECTION_CONFIG.CONNECTION_TIMEOUT);
-
-        socket.on('connect', () => {
-          clearTimeout(connectTimeout);
-          set({ socket, connectionStatus: 'connected' });
-          setupSocket(socket);
-
-          const account = get().myAccount;
-          if (account) {
-            socket.emit('login', { username: account.username }, () => {});
-          }
-
-          heartbeatInterval = setInterval(
-            () => socket.emit('ping_keep_alive'),
-            CONNECTION_CONFIG.HEARTBEAT_INTERVAL,
-          );
-          resolve();
-        });
-
-        socket.on('connect_error', err => {
-          clearTimeout(connectTimeout);
-          set({ connectionStatus: 'error' });
-          reject(err);
-        });
+        socket.once('connect', onConnect);
+        if (!socket.active) socket.connect();
       });
     },
 
-    login: (username: string): Promise<boolean> => {
-      return new Promise(resolve => {
-        const { socket } = get();
-        if (!socket) {
-          resolve(false);
-          return;
-        }
-        let settled = false;
-        socket.emit(
-          'login',
-          { username },
-          (result: { ok?: boolean; success?: boolean; account?: Account }) => {
-            if (settled) return;
-            settled = true;
-            if ((result?.ok || result?.success) && result.account) {
-              set({ myAccount: result.account });
-              resolve(true);
-            } else {
-              resolve(false);
-            }
-          },
-        );
-        setTimeout(() => {
-          if (!settled) {
-            settled = true;
-            resolve(false);
-          }
-        }, 5000);
-      });
+    login: (username: string) => identify(username, true),
+
+    resumeSession: async () => {
+      const name = savedUsername();
+      if (!name || get().myAccount) return false;
+      return identify(name, wasSeated());
+    },
+
+    switchAccount: () => {
+      const { socket, appPhase } = get();
+      if (appPhase === 'WAITING_ROOM' && socket?.connected) socket.emit('leave_lobby');
+      rememberUser(null);
+      setSeated(false);
+      set({ myAccount: null, appPhase: 'LOGIN', lobbyPlayers: [], lobbyUnlimitedTime: false });
     },
 
     refreshMyAccount: async () => {
@@ -356,115 +387,94 @@ const useGameStore = create<GameStore>((set, get) => {
     },
 
     enterLobby: () => {
+      setSeated(true);
       const { socket } = get();
       if (!socket) return;
+      if (!socket.connected) {
+        // The connect handler re-enters once the socket is back and logged in.
+        set({ connectionStatus: 'reconnecting' });
+        return;
+      }
       set({ connectionStatus: 'entering_lobby' });
-      clearEnterLobbyTimer();
-      enterLobbyTimer = setTimeout(() => {
-        enterLobbyTimer = null;
-        if (get().connectionStatus === 'entering_lobby' && get().appPhase === 'LOGIN') {
-          set({ appPhase: 'WAITING_ROOM', connectionStatus: 'in_lobby' });
-        }
-      }, 3000);
-      socket.emit('enter_lobby', (result: LobbyResponse) => {
-        handleLobbyResponse(result);
-      });
+      socket
+        .timeout(CONNECTION_CONFIG.ACK_TIMEOUT)
+        .emit('enter_lobby', (err: Error | null, result: LobbyResponse) => {
+          if (!err) {
+            handleLobbyResponse(result);
+            return;
+          }
+          if (get().connectionStatus === 'entering_lobby') {
+            set({ connectionStatus: 'connected' });
+            showToast('The lobby did not respond. Please try again.', 'warn');
+          }
+        });
     },
 
     leaveLobby: () => {
-      get().socket?.emit('leave_lobby');
+      setSeated(false);
+      const { socket } = get();
+      if (socket?.connected) socket.emit('leave_lobby');
       set({
         appPhase: 'LOGIN',
-        connectionStatus: 'connected',
         lobbyPlayers: [],
         lobbyUnlimitedTime: false,
+        ...(socket?.connected ? { connectionStatus: 'connected' as const } : {}),
       });
       void get().refreshMyAccount();
     },
 
     toggleReady: () => {
-      get().socket?.emit('toggle_ready');
+      liveSocket()?.emit('toggle_ready');
     },
 
     toggleGoFirst: () => {
-      get().socket?.emit('toggle_wants_first', (res: { error?: string }) => {
+      liveSocket()?.emit('toggle_wants_first', (res: { error?: string }) => {
         if (res?.error) showToast(res.error, 'warn');
       });
     },
 
     toggleUnlimitedTime: () => {
-      get().socket?.emit('toggle_unlimited_time', (res: { error?: string }) => {
+      liveSocket()?.emit('toggle_unlimited_time', (res: { error?: string }) => {
         if (res?.error) showToast(res.error, 'warn');
       });
     },
 
     sendAction: (action: Record<string, unknown>, onComplete?: (success: boolean) => void) => {
-      const { socket, roomId } = get();
+      const { roomId } = get();
+      const socket = liveSocket();
       if (!socket || !roomId) {
         onComplete?.(false);
         return;
       }
-      socket.emit('game_action', { roomId, action }, (res: { error?: string }) => {
-        onComplete?.(!res?.error);
-      });
+      socket
+        .timeout(CONNECTION_CONFIG.ACK_TIMEOUT)
+        .emit('game_action', { roomId, action }, (err: Error | null, res: { error?: string }) => {
+          onComplete?.(!err && !res?.error);
+        });
     },
 
     returnToLobby: () => {
       const { socket, roomId } = get();
-      set({
-        gameState: null,
-        roomId: null,
-        disconnectedPlayers: new Set(),
-      });
+      set({ gameState: null, roomId: null });
       void get().refreshMyAccount();
-      if (socket && roomId) {
-        socket.emit('return_to_lobby', { roomId }, () => {
-          if (socket.connected) {
-            socket.emit('enter_lobby', (result: LobbyResponse) => handleLobbyResponse(result));
-          } else {
-            set({ appPhase: 'LOGIN' });
-          }
-        });
-      } else if (socket) {
-        socket.emit('enter_lobby', (result: LobbyResponse) => handleLobbyResponse(result));
-      } else {
-        set({ appPhase: 'LOGIN' });
-      }
+      if (socket?.connected && roomId) socket.emit('return_to_lobby', { roomId });
+      get().enterLobby();
     },
 
     quitRoom: () => {
-      const { socket, roomId } = get();
-      if (socket && roomId) socket.emit('quit_room', { roomId });
-      set({
-        gameState: null,
-        roomId: null,
-        disconnectedPlayers: new Set(),
-      });
-      if (socket) {
-        socket.emit('enter_lobby', (result: LobbyResponse) => handleLobbyResponse(result));
-      } else {
-        set({ appPhase: 'LOGIN' });
-      }
+      const { roomId } = get();
+      const socket = liveSocket();
+      if (!socket) return;
+      if (roomId) socket.emit('quit_room', { roomId });
+      set({ gameState: null, roomId: null });
+      get().enterLobby();
     },
 
     resign: () => {
-      const { socket, roomId } = get();
+      const { roomId } = get();
+      const socket = liveSocket();
       if (!socket || !roomId) return;
       socket.emit('resign_game', { roomId });
-    },
-
-    disconnect: () => {
-      const { socket } = get();
-      if (socket) socket.disconnect();
-      if (heartbeatInterval) clearInterval(heartbeatInterval);
-      set({
-        socket: null,
-        connectionStatus: 'idle',
-        appPhase: 'LOGIN',
-        gameState: null,
-        disconnectedPlayers: new Set(),
-        toasts: [],
-      });
     },
 
     addToast: (message, type = 'info') => showToast(message, type),

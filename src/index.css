@@ -22,9 +22,18 @@
     width: 100%;
     height: 100%;
     overflow: hidden;
+    /* No pull-to-refresh / rubber-band mid-game */
+    overscroll-behavior: none;
     font-family: var(--font-sans);
     color: #f3efe6;
     background-color: #07261c;
+  }
+
+  /* The global user-select: none can stop iOS Safari from typing into inputs */
+  input,
+  textarea {
+    user-select: text;
+    -webkit-user-select: text;
   }
 }
 
@@ -90,5 +99,24 @@
 @supports (height: 100dvh) {
   .game-shell {
     height: 100dvh;
+  }
+}
+
+/* Table screens keep clear of the notch / Dynamic Island and the home indicator */
+.table-shell {
+  padding:
+    max(6px, env(safe-area-inset-top))
+    max(8px, env(safe-area-inset-right))
+    max(6px, env(safe-area-inset-bottom))
+    max(8px, env(safe-area-inset-left));
+}
+
+@media (min-width: 900px) and (min-height: 600px) {
+  .table-shell {
+    padding:
+      max(10px, env(safe-area-inset-top))
+      max(16px, env(safe-area-inset-right))
+      max(10px, env(safe-area-inset-bottom))
+      max(16px, env(safe-area-inset-left));
   }
 }

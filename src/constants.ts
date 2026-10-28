@@ -6,14 +6,11 @@ export const SERVER_URL =
   (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
 
 export const CONNECTION_CONFIG = {
-  HEARTBEAT_INTERVAL: 10000,
-  MAX_RECONNECT_ATTEMPTS: 15,
-  RECONNECT_DELAY_BASE: 1000,
-  RECONNECT_DELAY_MAX: 15000,
   CONNECTION_TIMEOUT: 45000,
   HEALTH_CHECK_RETRY: 3000,
   MAX_HEALTH_CHECKS: 20,
-  RECONNECT_CALLBACK_TIMEOUT: 8000,
+  ACK_TIMEOUT: 8000,
+  PROBE_TIMEOUT: 3000,
 };
 
 export const STRAIN_SYMBOLS: Record<Strain, string> = {

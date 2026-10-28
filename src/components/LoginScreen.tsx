@@ -1,12 +1,20 @@
 import React, { useState, useEffect, useRef } from 'react';
-import useGameStore from '../store/gameStore';
+import useGameStore, { savedUsername } from '../store/gameStore';
 import { SERVER_URL, CONNECTION_CONFIG } from '../constants';
 import Avatar from './Avatar';
 import type { Account } from '../types';
 
 export default function LoginScreen() {
-  const { connectionStatus, myAccount, connectToServer, login, enterLobby, openReplayBrowser } =
-    useGameStore();
+  const {
+    connectionStatus,
+    myAccount,
+    connectToServer,
+    login,
+    resumeSession,
+    switchAccount,
+    enterLobby,
+    openReplayBrowser,
+  } = useGameStore();
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [view, setView] = useState<'main' | 'create' | 'login'>('main');
   const [newName, setNewName] = useState('');
@@ -53,6 +61,11 @@ export default function LoginScreen() {
     setWakeStatus('Connecting...');
     try {
       await connectToServer();
+      // Back from a reload: sign in as before and rejoin a running game.
+      if (savedUsername()) {
+        setWakeStatus('Signing in...');
+        await resumeSession();
+      }
       setWakeStatus('');
       await fetchAccounts();
     } catch {
@@ -89,7 +102,6 @@ export default function LoginScreen() {
         if (ok) {
           setView('main');
           setNewName('');
-          enterLobby();
         } else {
           setError('Login failed after account creation');
         }
@@ -104,8 +116,7 @@ export default function LoginScreen() {
   async function handleLogin(username: string) {
     setError('');
     const ok = await login(username);
-    if (ok) enterLobby();
-    else setError('Login failed');
+    if (!ok) setError('Login failed');
   }
 
   useEffect(() => {
@@ -138,6 +149,15 @@ export default function LoginScreen() {
             className="w-full py-2.5 bg-emerald-800/70 hover:bg-emerald-700/80 text-amber-100 border border-amber-400/20 rounded-xl font-semibold transition text-sm cursor-pointer"
           >
             Replays
+          </button>
+          <button
+            onClick={() => {
+              switchAccount();
+              setView('main');
+            }}
+            className="w-full py-1.5 text-emerald-200/60 hover:text-amber-200 text-xs cursor-pointer"
+          >
+            Switch account
           </button>
         </div>
       </div>

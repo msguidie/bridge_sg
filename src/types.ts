@@ -53,6 +53,8 @@ export interface PlayerView {
   handCount: number;
   tricksWon: number;
   role: PlayerRole;
+  connected?: boolean;
+  disconnectDeadline?: number | null; // server time at which a disconnected seat forfeits
 }
 
 export interface TimeControlState {
@@ -100,6 +102,7 @@ export interface GameState {
   legalCardIds: number[];
   players: PlayerView[];
   timeControl: TimeControlState | null;
+  serverNow?: number; // live games: server clock at send time
 }
 
 export interface Account {
