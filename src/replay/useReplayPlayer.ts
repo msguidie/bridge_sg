@@ -27,13 +27,11 @@ function isTypingTarget(target: EventTarget | null): boolean {
   return target.isContentEditable;
 }
 
-export function useReplayPlayer(frameCount: number, seatCount: number): ReplayPlayer {
+export function useReplayPlayer(frameCount: number, initialPerspective: number): ReplayPlayer {
   const [index, setIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState<ReplaySpeed>(1);
-  const [perspective, setPerspective] = useState(() =>
-    seatCount > 0 ? Math.floor(Math.random() * seatCount) : 0,
-  );
+  const [perspective, setPerspective] = useState(initialPerspective);
 
   const lastIndex = Math.max(0, frameCount - 1);
   const atEnd = index >= lastIndex;

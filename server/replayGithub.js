@@ -5,6 +5,8 @@
 // ═══════════════════════════════════════════════════════════
 
 const API_ROOT = 'https://api.github.com';
+// A hung request would otherwise stall the replay queue and the account sync forever.
+const REQUEST_TIMEOUT_MS = 15000;
 
 class GithubApiError extends Error {
   constructor(status, message, body) {
@@ -65,7 +67,11 @@ function createClient(options = {}) {
   async function getFile(path) {
     if (!enabled) return null;
     const url = `${API_ROOT}/repos/${repo}/contents/${encodePath(path)}?ref=${encodeURIComponent(branch)}`;
-    const response = await fetchImpl(url, { method: 'GET', headers: headers() });
+    const response = await fetchImpl(url, {
+      method: 'GET',
+      headers: headers(),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
     if (response.status === 404) return null;
     if (!response.ok) {
       const body = await readBody(response);
@@ -91,6 +97,7 @@ function createClient(options = {}) {
       method: 'PUT',
       headers: headers(),
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (response.status === 409 || response.status === 422) {
       const body = await readBody(response);

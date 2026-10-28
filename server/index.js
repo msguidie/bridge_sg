@@ -2,8 +2,6 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
 const {
   createInitialGameState,
   clientViewForPlayer,
@@ -19,6 +17,7 @@ const {
 } = require('./gameLogic');
 const replayRecorder = require('./replayRecorder');
 const replayStore = require('./replayStore');
+const accountStore = require('./accountStore');
 
 const app = express();
 app.use(cors());
@@ -39,42 +38,26 @@ const io = new Server(server, {
   connectTimeout: 45000,
 });
 
+// A seat that stays disconnected this long forfeits (as a timeout).
+const DISCONNECT_GRACE_MS = Number(process.env.DISCONNECT_GRACE_MS) || 2 * 60 * 1000;
+
 // ═══════════════════════════════════════════════════════════
-// Accounts persistence (Initial rating = 0, wins +1 / losses -1)
+// Accounts (Initial rating = 0, wins +1 / losses -1)
+// Persisted by accountStore: local file + GitHub replay repo when configured.
 // ═══════════════════════════════════════════════════════════
 
-const DATA_FILE = path.join(__dirname, 'data', 'accounts.json');
+const { accounts } = accountStore;
 
-function ensureDataDir() {
-  const dir = path.dirname(DATA_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
-
-function loadAccounts() {
-  ensureDataDir();
-  if (!fs.existsSync(DATA_FILE)) return {};
-  try {
-    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
-  } catch {
-    return {};
-  }
-}
-
-function saveAccounts(accounts) {
-  ensureDataDir();
-  fs.writeFileSync(DATA_FILE, JSON.stringify(accounts, null, 2), 'utf-8');
-}
-
-let accounts = loadAccounts();
-
-app.get('/api/accounts', (_req, res) => {
+app.get('/api/accounts', async (_req, res) => {
+  await accountStore.ready;
   res.json(
     Object.values(accounts).sort((a, b) => (b.rating || 0) - (a.rating || 0)),
   );
 });
 
-app.post('/api/accounts', (req, res) => {
-  const { username } = req.body;
+app.post('/api/accounts', async (req, res) => {
+  await accountStore.ready;
+  const { username } = req.body || {};
   if (!username || typeof username !== 'string' || !username.trim()) {
     return res.status(400).json({ error: 'Username is required' });
   }
@@ -91,18 +74,8 @@ app.post('/api/accounts', (req, res) => {
     createdAt: Date.now(),
   };
   accounts[trimmed] = acct;
-  saveAccounts(accounts);
+  accountStore.save();
   res.status(201).json(acct);
-});
-
-app.delete('/api/accounts/:username', (req, res) => {
-  const { username } = req.params;
-  if (!accounts[username]) {
-    return res.status(404).json({ error: 'Account not found' });
-  }
-  delete accounts[username];
-  saveAccounts(accounts);
-  res.json({ ok: true });
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -179,8 +152,8 @@ let waitingRoom = {
   unlimitedTime: false,
 };
 
-function broadcastLobby() {
-  const payload = {
+function lobbySnapshot() {
+  return {
     players: waitingRoom.players.map(p => ({
       username: p.username,
       avatarSeed: p.avatarSeed,
@@ -189,6 +162,10 @@ function broadcastLobby() {
     })),
     unlimitedTime: !!waitingRoom.unlimitedTime,
   };
+}
+
+function broadcastLobby() {
+  const payload = lobbySnapshot();
   for (const p of waitingRoom.players) {
     io.to(p.socketId).emit('lobby_update', payload);
   }
@@ -215,13 +192,27 @@ function findActiveGame(username) {
   return null;
 }
 
+// Game view plus each seat's connection state (kept on the room, not in game state).
+function viewFor(room, seat) {
+  const view = clientViewForPlayer(room.state, seat);
+  view.serverNow = Date.now();
+  view.players.forEach((p, idx) => {
+    const rp = room.players[idx];
+    p.connected = !!rp?.connected;
+    p.disconnectDeadline =
+      rp && !rp.connected && rp.disconnectedAt ? rp.disconnectedAt + DISCONNECT_GRACE_MS : null;
+  });
+  return view;
+}
+
 function emitGameStateToRoom(room, eventName = 'game_state_update', extraPayload = {}) {
   for (let i = 0; i < room.players.length; i++) {
     const p = room.players[i];
     if (!p.socketId) continue;
     io.to(p.socketId).emit(eventName, {
       ...extraPayload,
-      state: clientViewForPlayer(room.state, i),
+      roomId: room.id,
+      state: viewFor(room, i),
     });
   }
 }
@@ -248,8 +239,21 @@ function finalizeFinishedGame(room) {
       acct.rating = (acct.rating || 0) + delta;
     }
   }
-  saveAccounts(accounts);
+  accountStore.save();
   replaySafe(() => replayRecorder.finish(room));
+}
+
+function forfeitOnTimeout(room, seat) {
+  if (room.trickResolveTimer) {
+    clearTimeout(room.trickResolveTimer);
+    room.trickResolveTimer = null;
+  }
+  processResign(room.state, seat, 'TIMEOUT');
+  replaySafe(() => replayRecorder.onTimeout(room, seat));
+  finalizeFinishedGame(room);
+  emitGameStateToRoom(room, 'game_state_update', {
+    lastAction: { type: 'TIMEOUT', actingPlayer: seat, payload: {} },
+  });
 }
 
 function scheduleTrickResolve(room) {
@@ -265,26 +269,30 @@ function scheduleTrickResolve(room) {
     if (!gameRooms.has(room.id)) return;
     if (!room.state.trickPendingResolve || room.state.phase !== 'PLAYING') return;
 
-    const now = Date.now();
-    const res = resolvePendingTrick(room.state, now);
-    if (!res) return;
+    try {
+      const now = Date.now();
+      const res = resolvePendingTrick(room.state, now);
+      if (!res) return;
 
-    const nextPlayer = room.players[room.state.currentPlayerIndex];
-    if (!res.gameOver && nextPlayer && !nextPlayer.connected) {
-      startTurnTimeControl(room.state, now, true);
+      const nextPlayer = room.players[room.state.currentPlayerIndex];
+      if (!res.gameOver && nextPlayer && !nextPlayer.connected) {
+        startTurnTimeControl(room.state, now, true);
+      }
+
+      if (room.state.phase === 'GAME_OVER') {
+        finalizeFinishedGame(room);
+      }
+
+      emitGameStateToRoom(room, 'game_state_update', {
+        lastAction: {
+          type: 'TRICK_RESOLVED',
+          actingPlayer: res.winnerIndex,
+          payload: { winnerIndex: res.winnerIndex },
+        },
+      });
+    } catch (err) {
+      console.error(`[room ${room.id}] trick resolve failed:`, err);
     }
-
-    if (room.state.phase === 'GAME_OVER') {
-      finalizeFinishedGame(room);
-    }
-
-    emitGameStateToRoom(room, 'game_state_update', {
-      lastAction: {
-        type: 'TRICK_RESOLVED',
-        actingPlayer: res.winnerIndex,
-        payload: { winnerIndex: res.winnerIndex },
-      },
-    });
   }, delay);
 }
 
@@ -301,6 +309,7 @@ function checkGameStart() {
     avatarSeed: p.avatarSeed,
     seatIndex: idx,
     connected: true,
+    disconnectedAt: null,
     wantsFirst: !!p.wantsFirst,
   }));
 
@@ -341,7 +350,7 @@ function checkGameStart() {
       roomId,
       seatIndex: i,
       playerIndex: i,
-      state: clientViewForPlayer(gameState, i),
+      state: viewFor(room, i),
     });
   }
 }
@@ -352,40 +361,47 @@ function checkGameStart() {
 
 const socketUsers = new Map();
 
+// Handlers get a plain-object payload and a callable ack whatever the client
+// sent, and a throw or rejection is logged instead of crashing the process
+// (which would drop every table at once).
+function handle(socket, event, handler) {
+  socket.on(event, (...args) => {
+    const ack = typeof args[args.length - 1] === 'function' ? args.pop() : () => {};
+    const payload = args[0] && typeof args[0] === 'object' ? args[0] : {};
+    Promise.resolve()
+      .then(() => handler(payload, ack))
+      .catch(err => console.error(`[socket] ${event} failed:`, err));
+  });
+}
+
 io.on('connection', socket => {
-  socket.on('login', ({ username } = {}, cb) => {
-    const acct = accounts[username];
-    if (!acct) return cb?.({ error: 'Account not found' });
-    socketUsers.set(socket.id, username);
-    cb?.({ ok: true, success: true, account: acct });
+  handle(socket, 'login', async ({ username }, ack) => {
+    await accountStore.ready;
+    const acct = typeof username === 'string' ? accounts[username] : null;
+    if (!acct) return ack({ error: 'Account not found' });
+    socketUsers.set(socket.id, acct.username);
+    ack({ ok: true, success: true, account: acct, inGame: !!findActiveGame(acct.username) });
   });
 
-  socket.on('enter_lobby', cb => {
+  handle(socket, 'enter_lobby', (_payload, ack) => {
     const username = socketUsers.get(socket.id);
-    if (!username) {
-      cb?.({ action: 'error', error: 'Login required' });
-      return;
-    }
+    if (!username) return ack({ action: 'error', error: 'Login required' });
     const acct = accounts[username];
-    if (!acct) {
-      cb?.({ action: 'error', error: 'Account not found' });
-      return;
-    }
+    if (!acct) return ack({ action: 'error', error: 'Account not found' });
 
     // Seamless Reconnect if user is in an active game
     const active = findActiveGame(username);
     if (active) {
       const { roomId, room, seat } = active;
       const now = Date.now();
-      const wasDisconnected = !room.players[seat].connected;
-      room.players[seat].socketId = socket.id;
-      room.players[seat].connected = true;
+      const rp = room.players[seat];
+      const wasDisconnected = !rp.connected;
+      rp.socketId = socket.id;
+      rp.connected = true;
+      rp.disconnectedAt = null;
       room.lastPlayerAction = now;
-      if (wasDisconnected && room.state.phase !== 'GAME_OVER' && room.state.timeControl) {
-        addTimeIncrement(room.state, seat, now);
-        if (room.state.currentPlayerIndex === seat) {
-          startTurnTimeControl(room.state, now, false);
-        }
+      if (wasDisconnected && room.state.currentPlayerIndex === seat) {
+        startTurnTimeControl(room.state, now, false);
       }
       socket.join(roomId);
 
@@ -393,22 +409,22 @@ io.on('connection', socket => {
         roomId,
         seatIndex: seat,
         playerIndex: seat,
-        state: clientViewForPlayer(room.state, seat),
+        state: viewFor(room, seat),
         isReconnect: true,
       });
 
       emitGameStateToRoom(room, 'game_state_update', {});
-      socket.to(roomId).emit('player_reconnected', { username, seatIndex: seat });
-      cb?.({ action: 'rejoin_game' });
-      return;
+      if (wasDisconnected) {
+        socket.to(roomId).emit('player_reconnected', { username, seatIndex: seat });
+      }
+      return ack({ action: 'rejoin_game' });
     }
 
     // Normal lobby entry (max 4 players)
     waitingRoom.players = waitingRoom.players.filter(p => p.username !== username);
     if (waitingRoom.players.length >= 4) {
       socket.emit('action_error', { message: 'Lobby is full (4/4 players)' });
-      cb?.({ action: 'lobby_full', error: 'Lobby is full (4/4 players)' });
-      return;
+      return ack({ action: 'lobby_full', error: 'Lobby is full (4/4 players)' });
     }
 
     waitingRoom.players.push({
@@ -419,21 +435,10 @@ io.on('connection', socket => {
       wantsFirst: false,
     });
     broadcastLobby();
-    cb?.({
-      action: 'lobby',
-      lobbyState: {
-        players: waitingRoom.players.map(p => ({
-          username: p.username,
-          avatarSeed: p.avatarSeed,
-          ready: p.ready,
-          wantsFirst: !!p.wantsFirst,
-        })),
-        unlimitedTime: !!waitingRoom.unlimitedTime,
-      },
-    });
+    ack({ action: 'lobby', lobbyState: lobbySnapshot() });
   });
 
-  socket.on('toggle_ready', () => {
+  handle(socket, 'toggle_ready', () => {
     const p = waitingRoom.players.find(x => x.socketId === socket.id);
     if (!p) return;
     p.ready = !p.ready;
@@ -441,44 +446,44 @@ io.on('connection', socket => {
     checkGameStart();
   });
 
-  socket.on('toggle_wants_first', cb => {
+  handle(socket, 'toggle_wants_first', (_payload, ack) => {
     const p = waitingRoom.players.find(x => x.socketId === socket.id);
-    if (!p) return cb?.({ error: 'Not in lobby' });
+    if (!p) return ack({ error: 'Not in lobby' });
     p.wantsFirst = !p.wantsFirst;
     broadcastLobby();
-    cb?.({ ok: true });
+    ack({ ok: true });
   });
 
-  socket.on('toggle_unlimited_time', cb => {
+  handle(socket, 'toggle_unlimited_time', (_payload, ack) => {
     const p = waitingRoom.players.find(x => x.socketId === socket.id);
-    if (!p) return cb?.({ error: 'Not in lobby' });
+    if (!p) return ack({ error: 'Not in lobby' });
     waitingRoom.unlimitedTime = !waitingRoom.unlimitedTime;
     waitingRoom.players.forEach(player => {
       player.ready = false;
     });
     broadcastLobby();
-    cb?.({ ok: true });
+    ack({ ok: true });
   });
 
-  socket.on('leave_lobby', () => {
+  handle(socket, 'leave_lobby', () => {
     removeFromLobby(socket.id);
   });
 
-  socket.on('return_to_lobby', ({ roomId } = {}, cb) => {
-    if (roomId) socket.leave(roomId);
-    cb?.({ ok: true });
+  handle(socket, 'return_to_lobby', ({ roomId }, ack) => {
+    if (typeof roomId === 'string') socket.leave(roomId);
+    ack({ ok: true });
   });
 
   // ── Game actions (Bidding, Calling Partner, Playing Cards) ──
-  socket.on('game_action', ({ roomId, action } = {}, ack) => {
+  handle(socket, 'game_action', ({ roomId, action }, ack) => {
     const room = gameRooms.get(roomId);
     if (!room) {
-      ack?.({ error: 'Room not found' });
+      ack({ error: 'Room not found' });
       return;
     }
     const playerIdx = room.players.findIndex(p => p.socketId === socket.id);
     if (playerIdx === -1) {
-      ack?.({ error: 'Not in room' });
+      ack({ error: 'Not in room' });
       return;
     }
 
@@ -486,14 +491,8 @@ io.on('connection', socket => {
     room.lastPlayerAction = now;
     const clockStatus = updateTimeControl(room.state, now);
     if (clockStatus.expired) {
-      const timedOutIndex = room.state.currentPlayerIndex;
-      processResign(room.state, timedOutIndex, 'TIMEOUT');
-      replaySafe(() => replayRecorder.onTimeout(room, timedOutIndex));
-      finalizeFinishedGame(room);
-      emitGameStateToRoom(room, 'game_state_update', {
-        lastAction: { type: 'TIMEOUT', actingPlayer: timedOutIndex, payload: {} },
-      });
-      ack?.({ error: 'Active player ran out of time' });
+      forfeitOnTimeout(room, room.state.currentPlayerIndex);
+      ack({ error: 'Active player ran out of time' });
       return;
     }
 
@@ -508,7 +507,7 @@ io.on('connection', socket => {
         startTurnTimeControl(room.state, now, false);
       }
       socket.emit('action_error', { message: res.error });
-      ack?.({ error: res.error });
+      ack({ error: res.error });
       return;
     }
 
@@ -531,11 +530,11 @@ io.on('connection', socket => {
     emitGameStateToRoom(room, 'game_state_update', {
       lastAction: res.result,
     });
-    ack?.({ ok: true });
+    ack({ ok: true });
   });
 
   // ── Resign (Forfeit) ──
-  socket.on('resign_game', ({ roomId }) => {
+  handle(socket, 'resign_game', ({ roomId }) => {
     const room = gameRooms.get(roomId);
     if (!room) return;
     const playerIdx = room.players.findIndex(p => p.socketId === socket.id);
@@ -560,7 +559,7 @@ io.on('connection', socket => {
   });
 
   // ── Quit Room (Return everyone to lobby) ──
-  socket.on('quit_room', ({ roomId }) => {
+  handle(socket, 'quit_room', ({ roomId }) => {
     const room = gameRooms.get(roomId);
     if (!room) return;
     const playerIdx = room.players.findIndex(p => p.socketId === socket.id);
@@ -583,36 +582,31 @@ io.on('connection', socket => {
     gameRooms.delete(roomId);
   });
 
-  // ── Keep-alive ping ──
-  socket.on('ping_keep_alive', () => {
-    socket.emit('pong_keep_alive');
-    const username = socketUsers.get(socket.id);
-    if (username) {
-      const active = findActiveGame(username);
-      if (active) active.room.lastPlayerAction = Date.now();
-    }
+  // ── Liveness probe (clients ask when they come back from the background) ──
+  handle(socket, 'ping_check', (_payload, ack) => {
+    ack({ ok: true });
   });
 
   // ── Disconnect ──
-  socket.on('disconnect', () => {
+  handle(socket, 'disconnect', () => {
     const username = socketUsers.get(socket.id);
     socketUsers.delete(socket.id);
     removeFromLobby(socket.id);
+    if (!username) return;
 
-    if (username) {
-      for (const [roomId, room] of gameRooms) {
-        const seat = room.players.findIndex(
-          p => p.username === username && p.socketId === socket.id,
-        );
-        if (seat !== -1) {
-          const now = Date.now();
-          room.players[seat].connected = false;
-          pauseTurnTimeControl(room.state, seat, now);
-          emitGameStateToRoom(room, 'game_state_update', {});
-          socket.to(roomId).emit('player_disconnected', { username, seatIndex: seat });
-          break;
-        }
-      }
+    for (const [roomId, room] of gameRooms) {
+      if (room.state.phase === 'GAME_OVER') continue;
+      const seat = room.players.findIndex(
+        p => p.username === username && p.socketId === socket.id,
+      );
+      if (seat === -1) continue;
+      const now = Date.now();
+      room.players[seat].connected = false;
+      room.players[seat].disconnectedAt = now;
+      pauseTurnTimeControl(room.state, seat, now);
+      emitGameStateToRoom(room, 'game_state_update', {});
+      socket.to(roomId).emit('player_disconnected', { username, seatIndex: seat });
+      break;
     }
   });
 });
@@ -654,25 +648,32 @@ setInterval(() => {
   }
 }, 60 * 1000);
 
+// The seat that has been gone longest past the grace period, or -1. Only while
+// someone is still at the table: a table everyone left just expires.
+function expiredDisconnect(room, now) {
+  if (!room.players.some(p => p.connected)) return -1;
+  let seat = -1;
+  room.players.forEach((p, idx) => {
+    if (p.connected || !p.disconnectedAt || now - p.disconnectedAt < DISCONNECT_GRACE_MS) return;
+    if (seat === -1 || p.disconnectedAt < room.players[seat].disconnectedAt) seat = idx;
+  });
+  return seat;
+}
+
 setInterval(() => {
   const now = Date.now();
   for (const [, room] of gameRooms) {
-    if (room.state.phase === 'GAME_OVER' || !room.state.timeControl) continue;
-    const status = updateTimeControl(room.state, now);
-    if (!status.expired) continue;
-
-    const timedOutIndex = room.state.currentPlayerIndex;
-    if (room.trickResolveTimer) {
-      clearTimeout(room.trickResolveTimer);
-      room.trickResolveTimer = null;
+    if (room.state.phase === 'GAME_OVER') continue;
+    try {
+      if (room.state.timeControl && updateTimeControl(room.state, now).expired) {
+        forfeitOnTimeout(room, room.state.currentPlayerIndex);
+        continue;
+      }
+      const gone = expiredDisconnect(room, now);
+      if (gone !== -1) forfeitOnTimeout(room, gone);
+    } catch (err) {
+      console.error(`[room ${room.id}] tick failed:`, err);
     }
-    processResign(room.state, timedOutIndex, 'TIMEOUT');
-    replaySafe(() => replayRecorder.onTimeout(room, timedOutIndex));
-    finalizeFinishedGame(room);
-
-    emitGameStateToRoom(room, 'game_state_update', {
-      lastAction: { type: 'TIMEOUT', actingPlayer: timedOutIndex, payload: {} },
-    });
   }
 }, 250);
 
@@ -685,8 +686,10 @@ if (require.main === module) {
   server.listen(PORT, () => {
     console.log(`Singaporean Bridge Server listening on port ${PORT}`);
 
+    // Self-ping keeps a free Render instance awake. Set KEEP_AWAKE=0 to let it
+    // sleep when idle (saves free instance hours; first visit then waits ~1 min).
     const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
-    if (RENDER_URL) {
+    if (RENDER_URL && process.env.KEEP_AWAKE !== '0') {
       setInterval(() => {
         fetch(`${RENDER_URL}/health`).catch(() => {});
       }, 5 * 60 * 1000);

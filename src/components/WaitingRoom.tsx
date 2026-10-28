@@ -109,7 +109,8 @@ export default function WaitingRoom() {
           ) : null}
         </div>
 
-        <div className="flex gap-2">
+        {/* Stays in view when the card scrolls (phones on their side) */}
+        <div className="flex gap-2 sticky -bottom-4 sm:-bottom-6 pt-2 pb-4 sm:pb-6 -mb-4 sm:-mb-6 bg-[#07241b]">
           <button
             onClick={leaveLobby}
             className="px-4 py-2.5 rounded-xl text-xs font-medium text-emerald-200/70 hover:text-amber-100 bg-[#0b3527]/70 border border-amber-400/15 transition cursor-pointer"
