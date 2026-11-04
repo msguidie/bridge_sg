@@ -61,7 +61,7 @@
    qsub -P <项目号> scripts/nscc_train.pbs
    ```
    - 中途被杀或断了，重新提交同一条命令即可，四个 run 都会从各自的 `runs/<预设>/latest.pt` 续上。
-   - 想再训第二天：`qsub -P <项目号> -v HOURS=46.6 scripts/nscc_train.pbs`。`HOURS` 是每个 run 的累计总时长。
+   - 想再训第二天：`qsub -P <项目号> -v HOURS=46.6 scripts/nscc_train.pbs`。`HOURS` 是每个 run 的累计总时长。学习率和熵系数是按"已用时间 / 总时长"插值的，所以延长后它们会先回升，再衰减到新的终点，相当于一次温和重启。
 5. **监控**：
    ```bash
    qstat -answ1 $USER

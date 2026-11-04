@@ -53,12 +53,18 @@ class Actor(nn.Module):
             levels = torch.arange(NUM_BIDS, dtype=torch.float32) // 5
             self.policy.bias[BID0:BID0 + NUM_BIDS] = -bid_slope * levels
 
+    def _logits(self, h: torch.Tensor) -> torch.Tensor:
+        # fp32 head: bf16 logits would round differently between rollout and update
+        # batches and add noise to the PPO ratio
+        with torch.autocast(h.device.type, enabled=False):
+            return self.policy(h.float())
+
     def policy_logits(self, obs: torch.Tensor) -> torch.Tensor:
-        return self.policy(self.trunk(obs))
+        return self._logits(self.trunk(obs))
 
     def forward(self, obs: torch.Tensor):
         h = self.trunk(obs)
-        return self.policy(h), self.belief(h).view(-1, 52, 4), self.loyal(h), self.value(h).squeeze(-1)
+        return self._logits(h), self.belief(h).view(-1, 52, 4), self.loyal(h), self.value(h).squeeze(-1)
 
 
 class Critic(nn.Module):
