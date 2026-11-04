@@ -1,0 +1,29 @@
+#!/bin/bash
+# The 1-day run: four presets, one per A100, each its own process and run dir.
+#     cd ai && qsub -P <project> scripts/nscc_train.pbs
+# Resubmitting the same command resumes every run from runs/<preset>/latest.pt.
+# HOURS is the TOTAL training budget per run (all resumed jobs together), so a
+# second day is: qsub -P <project> -v HOURS=46.6 scripts/nscc_train.pbs
+# Watch: qstat -answ1 $USER ; tail -f runs/base/train.log ; python -m bridge_ai.report runs
+#PBS -q ai
+#PBS -l select=1:ngpus=4:ncpus=64:mem=440gb
+#PBS -l walltime=23:59:00
+#PBS -N bridge-train
+#PBS -j oe
+set -o pipefail
+cd "${PBS_O_WORKDIR:-$PWD}" || exit 1
+[ -d bridge_ai ] || cd ai || exit 1
+. scripts/env.sh
+
+PRESETS="${PRESETS:-base wide explore lam98}"
+HOURS="${HOURS:-23.3}"
+gpu=0
+for p in $PRESETS; do
+    mkdir -p "runs/$p"
+    echo "GPU $gpu -> runs/$p (log runs/$p/train.log)"
+    CUDA_VISIBLE_DEVICES=$gpu python -m bridge_ai.train --preset "$p" --run-dir "runs/$p" \
+        --set train_hours="$HOURS" >> "runs/$p/train.log" 2>&1 &
+    gpu=$((gpu + 1))
+done
+wait
+python -m bridge_ai.report runs

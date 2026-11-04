@@ -1,0 +1,16 @@
+#!/bin/bash
+# After training: every run vs the heuristic (1+3) and a 2+2 round robin between
+# the runs; writes runs/eval.json and exports every actor plus the best one to exports/.
+#     cd ai && qsub -P <project> scripts/nscc_eval.pbs        (optional: -v DEALS=16384)
+#PBS -q ai
+#PBS -l select=1:ngpus=1:ncpus=16:mem=124gb
+#PBS -l walltime=01:00:00
+#PBS -N bridge-eval
+#PBS -j oe
+set -o pipefail
+cd "${PBS_O_WORKDIR:-$PWD}" || exit 1
+[ -d bridge_ai ] || cd ai || exit 1
+. scripts/env.sh
+
+python -m bridge_ai.arena --runs runs/base runs/wide runs/explore runs/lam98 \
+    --deals "${DEALS:-8192}" --out runs/eval.json --export-dir exports
