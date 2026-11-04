@@ -71,7 +71,6 @@ interface GameStore {
   playerIndex: number;
 
   lobbyPlayers: LobbyPlayer[];
-  lobbyUnlimitedTime: boolean;
   gameState: GameState | null;
   lastActionResult: ActionResult | null;
   reconnectAttempts: number;
@@ -93,8 +92,6 @@ interface GameStore {
   enterLobby: () => void;
   leaveLobby: () => void;
   toggleReady: () => void;
-  toggleGoFirst: () => void;
-  toggleUnlimitedTime: () => void;
   sendAction: (action: Record<string, unknown>, onComplete?: (success: boolean) => void) => void;
   returnToLobby: () => void;
   quitRoom: () => void;
@@ -124,10 +121,7 @@ const useGameStore = create<GameStore>((set, get) => {
 
   function applyLobbyState(lobbyState?: LobbyState) {
     if (!lobbyState) return;
-    set({
-      lobbyPlayers: lobbyState.players,
-      lobbyUnlimitedTime: !!lobbyState.unlimitedTime,
-    });
+    set({ lobbyPlayers: lobbyState.players });
   }
 
   // Requests are not queued while offline: socket.io would replay them before
@@ -311,7 +305,6 @@ const useGameStore = create<GameStore>((set, get) => {
     roomId: null,
     playerIndex: -1,
     lobbyPlayers: [],
-    lobbyUnlimitedTime: false,
     gameState: null,
     lastActionResult: null,
     reconnectAttempts: 0,
@@ -369,7 +362,7 @@ const useGameStore = create<GameStore>((set, get) => {
       if (appPhase === 'WAITING_ROOM' && socket?.connected) socket.emit('leave_lobby');
       rememberUser(null);
       setSeated(false);
-      set({ myAccount: null, appPhase: 'LOGIN', lobbyPlayers: [], lobbyUnlimitedTime: false });
+      set({ myAccount: null, appPhase: 'LOGIN', lobbyPlayers: [] });
     },
 
     refreshMyAccount: async () => {
@@ -417,7 +410,6 @@ const useGameStore = create<GameStore>((set, get) => {
       set({
         appPhase: 'LOGIN',
         lobbyPlayers: [],
-        lobbyUnlimitedTime: false,
         ...(socket?.connected ? { connectionStatus: 'connected' as const } : {}),
       });
       void get().refreshMyAccount();
@@ -425,18 +417,6 @@ const useGameStore = create<GameStore>((set, get) => {
 
     toggleReady: () => {
       liveSocket()?.emit('toggle_ready');
-    },
-
-    toggleGoFirst: () => {
-      liveSocket()?.emit('toggle_wants_first', (res: { error?: string }) => {
-        if (res?.error) showToast(res.error, 'warn');
-      });
-    },
-
-    toggleUnlimitedTime: () => {
-      liveSocket()?.emit('toggle_unlimited_time', (res: { error?: string }) => {
-        if (res?.error) showToast(res.error, 'warn');
-      });
     },
 
     sendAction: (action: Record<string, unknown>, onComplete?: (success: boolean) => void) => {

@@ -57,14 +57,6 @@ export interface PlayerView {
   disconnectDeadline?: number | null; // server time at which a disconnected seat forfeits
 }
 
-export interface TimeControlState {
-  mainTimeMs: number;
-  incrementMs: number;
-  playerTimeRemainingMs: number[];
-  activeSince: number | null;
-  serverNow: number;
-}
-
 export interface GameResult {
   winnerSide: 'LORD_WIN' | 'REBEL_WIN';
   reason: 'TRICKS' | 'FORFEIT' | 'TIMEOUT';
@@ -101,7 +93,6 @@ export interface GameState {
   gameResult: GameResult | null;
   legalCardIds: number[];
   players: PlayerView[];
-  timeControl: TimeControlState | null;
   serverNow?: number; // live games: server clock at send time
 }
 
@@ -136,12 +127,10 @@ export interface LobbyPlayer {
   username: string;
   avatarSeed: number;
   ready: boolean;
-  wantsFirst: boolean;
 }
 
 export interface LobbyState {
   players: LobbyPlayer[];
-  unlimitedTime: boolean;
 }
 
 export interface ActionResult {
@@ -180,7 +169,6 @@ export interface ReplayData {
   meta: {
     t: number;
     e: number;
-    clock: boolean;
     first: number;
     players: { username: string; avatarSeed: number }[];
     result: {

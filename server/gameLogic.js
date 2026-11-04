@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════
 // Server-side game logic — Singaporean Bridge (Floating Bridge)
-// Single source of truth for bidding, partner calling, trick-taking, and clocks
+// Single source of truth for bidding, partner calling and trick-taking
 // ═══════════════════════════════════════════════════════════
 
 // Suits: 0 = Clubs (♣), 1 = Diamonds (♦), 2 = Hearts (♥), 3 = Spades (♠), 4 = No Trump (NT, bidding only)
@@ -107,10 +107,6 @@ function createInitialGameState(players, options = {}) {
       ? options.firstPlayerIndex
       : Math.floor(Math.random() * n);
 
-  const now = Date.now();
-  const mainTimeMs = 90 * 1000; // 1.5 minutes base time
-  const incrementMs = 10 * 1000; // +10 seconds per action
-
   return {
     phase: 'BIDDING', // 'BIDDING' | 'CALL_PARTNER' | 'PLAYING' | 'GAME_OVER'
     players: gamePlayers,
@@ -136,15 +132,6 @@ function createInitialGameState(players, options = {}) {
     turnNumber: 0,
     resignedPlayers: [],
     gameResult: null,
-    timeControl: !options.unlimitedTime
-      ? {
-          mainTimeMs,
-          incrementMs,
-          playerTimeRemainingMs: new Array(n).fill(mainTimeMs),
-          activeSince: now,
-          serverNow: now,
-        }
-      : null,
   };
 }
 
@@ -217,76 +204,7 @@ function clientViewForPlayer(state, viewerIndex) {
       tricksWon: p.tricksWon,
       role: isGameOver ? getRoleForSeat(state, idx) : idx === state.declarerIndex ? 'LORD' : null,
     })),
-    timeControl: state.timeControl
-      ? { ...state.timeControl, serverNow: Date.now() }
-      : null,
   };
-}
-
-// ── Time Control Helpers ──
-
-function updateTimeControl(state, now = Date.now()) {
-  const clock = state.timeControl;
-  if (!clock || state.phase === 'GAME_OVER') {
-    return { enabled: false, paused: false, expired: false };
-  }
-  if (state.trickPendingResolve) {
-    clock.serverNow = now;
-    return { enabled: true, paused: true, expired: false };
-  }
-
-  clock.serverNow = now;
-  if (clock.activeSince === null) {
-    return { enabled: true, paused: true, expired: false };
-  }
-
-  const playerIndex = state.currentPlayerIndex;
-  const remaining = Math.max(0, clock.playerTimeRemainingMs[playerIndex] ?? 0);
-  const elapsed = Math.max(0, now - clock.activeSince);
-  if (elapsed < remaining) {
-    return { enabled: true, paused: false, expired: false };
-  }
-
-  clock.playerTimeRemainingMs[playerIndex] = 0;
-  clock.activeSince = null;
-  return { enabled: true, paused: false, expired: true };
-}
-
-function consumeTurnTime(state, playerIndex, now = Date.now()) {
-  const clock = state.timeControl;
-  if (!clock) return;
-  if (clock.activeSince !== null) {
-    const elapsed = Math.max(0, now - clock.activeSince);
-    clock.playerTimeRemainingMs[playerIndex] = Math.max(
-      0,
-      (clock.playerTimeRemainingMs[playerIndex] ?? 0) - elapsed,
-    );
-  }
-  clock.activeSince = now;
-  clock.serverNow = now;
-}
-
-function addTimeIncrement(state, playerIndex, now = Date.now()) {
-  const clock = state.timeControl;
-  if (!clock) return;
-  clock.playerTimeRemainingMs[playerIndex] =
-    Math.max(0, clock.playerTimeRemainingMs[playerIndex] ?? 0) + clock.incrementMs;
-  clock.serverNow = now;
-}
-
-function startTurnTimeControl(state, now = Date.now(), paused = false) {
-  const clock = state.timeControl;
-  if (!clock || state.phase === 'GAME_OVER') return;
-  clock.activeSince = paused || state.trickPendingResolve ? null : now;
-  clock.serverNow = now;
-}
-
-function pauseTurnTimeControl(state, playerIndex, now = Date.now()) {
-  const clock = state.timeControl;
-  if (!clock || state.phase === 'GAME_OVER' || state.currentPlayerIndex !== playerIndex) return;
-  consumeTurnTime(state, playerIndex, now);
-  clock.activeSince = null;
-  clock.serverNow = now;
 }
 
 // ── Trick winner evaluation ──
@@ -322,9 +240,6 @@ function evaluateTrickWinner(currentTrick, contract) {
 function finalizeGame(state, winnerSide, reason, forfeitingPlayerIndex = null) {
   state.phase = 'GAME_OVER';
   state.trickPendingResolve = null;
-  if (state.timeControl) {
-    state.timeControl.activeSince = null;
-  }
   const lordTricks =
     state.declarerIndex !== null && state.partnerIndex !== null
       ? state.players[state.declarerIndex].tricksWon + state.players[state.partnerIndex].tricksWon
@@ -347,7 +262,7 @@ function finalizeGame(state, winnerSide, reason, forfeitingPlayerIndex = null) {
 
 // ── Resolve the 1.5s paused trick ──
 
-function resolvePendingTrick(state, now = Date.now()) {
+function resolvePendingTrick(state) {
   if (!state.trickPendingResolve || state.phase !== 'PLAYING') return null;
 
   const { winnerIndex, winningCardId } = state.trickPendingResolve;
@@ -388,7 +303,6 @@ function resolvePendingTrick(state, now = Date.now()) {
   };
   state.currentPlayerIndex = winnerIndex;
   state.turnNumber += 1;
-  startTurnTimeControl(state, now, false);
 
   return { gameOver: false, winnerIndex };
 }
@@ -557,9 +471,6 @@ function processAction(state, playerIndex, action) {
         winningCardId: best.card.id,
         resolveAt,
       };
-      if (state.timeControl) {
-        state.timeControl.activeSince = null;
-      }
 
       result.payload = {
         card,
@@ -607,9 +518,4 @@ module.exports = {
   resolvePendingTrick,
   processResign,
   calculateRatingChanges,
-  updateTimeControl,
-  consumeTurnTime,
-  addTimeIncrement,
-  startTurnTimeControl,
-  pauseTurnTimeControl,
 };

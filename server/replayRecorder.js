@@ -36,7 +36,6 @@ function begin(room) {
       id: room.id,
       t: room.createdAt || Date.now(),
       e: null,
-      clock: !!state.timeControl,
       players: state.players.map(p => ({
         u: p.username,
         a: p.avatarSeed ?? 1,

@@ -65,7 +65,6 @@ function replayStateView(state) {
       tricksWon: p.tricksWon,
       role: getRole(state, idx),
     })),
-    timeControl: null,
   };
 }
 
@@ -118,7 +117,6 @@ function buildInitialState(json) {
 
   const state = createInitialGameState(players, {
     firstPlayerIndex: json.first ?? 0,
-    unlimitedTime: true,
   });
 
   for (let i = 0; i < 4; i++) {
@@ -136,7 +134,6 @@ function buildInitialState(json) {
 
   state.currentPlayerIndex = json.first ?? 0;
   state.firstBidderIndex = json.first ?? 0;
-  state.timeControl = null;
   return state;
 }
 
@@ -145,7 +142,6 @@ function reconstruct(replayJson) {
   const meta = {
     t: replayJson.t ?? null,
     e: replayJson.e ?? null,
-    clock: replayJson.clock === true,
     first: replayJson.first ?? 0,
     players: replayJson.players.map(p => ({
       username: p.u,

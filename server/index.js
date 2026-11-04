@@ -9,11 +9,6 @@ const {
   resolvePendingTrick,
   processResign,
   calculateRatingChanges,
-  updateTimeControl,
-  consumeTurnTime,
-  addTimeIncrement,
-  startTurnTimeControl,
-  pauseTurnTimeControl,
 } = require('./gameLogic');
 const replayRecorder = require('./replayRecorder');
 const replayStore = require('./replayStore');
@@ -148,8 +143,7 @@ app.get('/api/replays/:id/raw', async (req, res) => {
 // ═══════════════════════════════════════════════════════════
 
 let waitingRoom = {
-  players: [], // { socketId, username, avatarSeed, ready, wantsFirst }
-  unlimitedTime: false,
+  players: [], // { socketId, username, avatarSeed, ready }
 };
 
 function lobbySnapshot() {
@@ -158,9 +152,7 @@ function lobbySnapshot() {
       username: p.username,
       avatarSeed: p.avatarSeed,
       ready: p.ready,
-      wantsFirst: !!p.wantsFirst,
     })),
-    unlimitedTime: !!waitingRoom.unlimitedTime,
   };
 }
 
@@ -270,14 +262,8 @@ function scheduleTrickResolve(room) {
     if (!room.state.trickPendingResolve || room.state.phase !== 'PLAYING') return;
 
     try {
-      const now = Date.now();
-      const res = resolvePendingTrick(room.state, now);
+      const res = resolvePendingTrick(room.state);
       if (!res) return;
-
-      const nextPlayer = room.players[room.state.currentPlayerIndex];
-      if (!res.gameOver && nextPlayer && !nextPlayer.connected) {
-        startTurnTimeControl(room.state, now, true);
-      }
 
       if (room.state.phase === 'GAME_OVER') {
         finalizeFinishedGame(room);
@@ -310,25 +296,12 @@ function checkGameStart() {
     seatIndex: idx,
     connected: true,
     disconnectedAt: null,
-    wantsFirst: !!p.wantsFirst,
   }));
 
-  const preferredIndices = roomPlayers
-    .map((p, idx) => (p.wantsFirst ? idx : -1))
-    .filter(idx => idx !== -1);
-  const firstPlayerIndex =
-    preferredIndices.length > 0
-      ? preferredIndices[Math.floor(Math.random() * preferredIndices.length)]
-      : undefined;
-
-  const unlimitedTime = !!waitingRoom.unlimitedTime;
   waitingRoom.players = [];
-  waitingRoom.unlimitedTime = false;
 
-  const gameState = createInitialGameState(roomPlayers, {
-    firstPlayerIndex,
-    unlimitedTime,
-  });
+  // The first bidder is drawn at random.
+  const gameState = createInitialGameState(roomPlayers);
 
   const room = {
     id: roomId,
@@ -393,16 +366,12 @@ io.on('connection', socket => {
     const active = findActiveGame(username);
     if (active) {
       const { roomId, room, seat } = active;
-      const now = Date.now();
       const rp = room.players[seat];
       const wasDisconnected = !rp.connected;
       rp.socketId = socket.id;
       rp.connected = true;
       rp.disconnectedAt = null;
-      room.lastPlayerAction = now;
-      if (wasDisconnected && room.state.currentPlayerIndex === seat) {
-        startTurnTimeControl(room.state, now, false);
-      }
+      room.lastPlayerAction = Date.now();
       socket.join(roomId);
 
       socket.emit('game_start', {
@@ -432,7 +401,6 @@ io.on('connection', socket => {
       username: acct.username,
       avatarSeed: acct.avatarSeed,
       ready: false,
-      wantsFirst: false,
     });
     broadcastLobby();
     ack({ action: 'lobby', lobbyState: lobbySnapshot() });
@@ -444,25 +412,6 @@ io.on('connection', socket => {
     p.ready = !p.ready;
     broadcastLobby();
     checkGameStart();
-  });
-
-  handle(socket, 'toggle_wants_first', (_payload, ack) => {
-    const p = waitingRoom.players.find(x => x.socketId === socket.id);
-    if (!p) return ack({ error: 'Not in lobby' });
-    p.wantsFirst = !p.wantsFirst;
-    broadcastLobby();
-    ack({ ok: true });
-  });
-
-  handle(socket, 'toggle_unlimited_time', (_payload, ack) => {
-    const p = waitingRoom.players.find(x => x.socketId === socket.id);
-    if (!p) return ack({ error: 'Not in lobby' });
-    waitingRoom.unlimitedTime = !waitingRoom.unlimitedTime;
-    waitingRoom.players.forEach(player => {
-      player.ready = false;
-    });
-    broadcastLobby();
-    ack({ ok: true });
   });
 
   handle(socket, 'leave_lobby', () => {
@@ -487,41 +436,16 @@ io.on('connection', socket => {
       return;
     }
 
-    const now = Date.now();
-    room.lastPlayerAction = now;
-    const clockStatus = updateTimeControl(room.state, now);
-    if (clockStatus.expired) {
-      forfeitOnTimeout(room, room.state.currentPlayerIndex);
-      ack({ error: 'Active player ran out of time' });
-      return;
-    }
-
-    const actingIndex = room.state.currentPlayerIndex;
-    if (actingIndex === playerIdx) {
-      consumeTurnTime(room.state, actingIndex, now);
-    }
-
+    room.lastPlayerAction = Date.now();
     const res = processAction(room.state, playerIdx, action);
     if (res.error) {
-      if (actingIndex === playerIdx && !room.state.trickPendingResolve) {
-        startTurnTimeControl(room.state, now, false);
-      }
       socket.emit('action_error', { message: res.error });
       ack({ error: res.error });
       return;
     }
 
     replaySafe(() => replayRecorder.onActionResult(room, res.result));
-
-    if (res.completed) {
-      addTimeIncrement(room.state, actingIndex, now);
-      if (res.trickComplete) {
-        scheduleTrickResolve(room);
-      } else {
-        const nextPlayer = room.players[room.state.currentPlayerIndex];
-        startTurnTimeControl(room.state, now, !nextPlayer?.connected);
-      }
-    }
+    if (res.trickComplete) scheduleTrickResolve(room);
 
     if (room.state.phase === 'GAME_OVER') {
       finalizeFinishedGame(room);
@@ -540,11 +464,7 @@ io.on('connection', socket => {
     const playerIdx = room.players.findIndex(p => p.socketId === socket.id);
     if (playerIdx === -1) return;
 
-    const now = Date.now();
-    room.lastPlayerAction = now;
-    if (room.state.currentPlayerIndex === playerIdx) {
-      consumeTurnTime(room.state, playerIdx, now);
-    }
+    room.lastPlayerAction = Date.now();
     if (room.trickResolveTimer) {
       clearTimeout(room.trickResolveTimer);
       room.trickResolveTimer = null;
@@ -600,10 +520,8 @@ io.on('connection', socket => {
         p => p.username === username && p.socketId === socket.id,
       );
       if (seat === -1) continue;
-      const now = Date.now();
       room.players[seat].connected = false;
-      room.players[seat].disconnectedAt = now;
-      pauseTurnTimeControl(room.state, seat, now);
+      room.players[seat].disconnectedAt = Date.now();
       emitGameStateToRoom(room, 'game_state_update', {});
       socket.to(roomId).emit('player_disconnected', { username, seatIndex: seat });
       break;
@@ -612,7 +530,7 @@ io.on('connection', socket => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// Periodic room cleanup & clock expiration monitor
+// Periodic room cleanup & disconnect monitor
 // ═══════════════════════════════════════════════════════════
 
 const ROOM_MAX_AGE_MS = 2 * 60 * 60 * 1000;
@@ -665,17 +583,13 @@ setInterval(() => {
   for (const [, room] of gameRooms) {
     if (room.state.phase === 'GAME_OVER') continue;
     try {
-      if (room.state.timeControl && updateTimeControl(room.state, now).expired) {
-        forfeitOnTimeout(room, room.state.currentPlayerIndex);
-        continue;
-      }
       const gone = expiredDisconnect(room, now);
       if (gone !== -1) forfeitOnTimeout(room, gone);
     } catch (err) {
       console.error(`[room ${room.id}] tick failed:`, err);
     }
   }
-}, 250);
+}, 1000);
 
 // ═══════════════════════════════════════════════════════════
 // Start standalone server (Render) or export for Vite dev server

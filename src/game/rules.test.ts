@@ -20,8 +20,8 @@ const mockPlayers = [
   { username: 'Diana', avatarSeed: 4 },
 ];
 
-test('initial state deals 13 cards to each of 4 players and starts in BIDDING with 1.5m + 10s clock', () => {
-  const state = createInitialGameState(mockPlayers, { firstPlayerIndex: 0, unlimitedTime: false });
+test('initial state deals 13 cards to each of 4 players and starts in BIDDING without a clock', () => {
+  const state = createInitialGameState(mockPlayers, { firstPlayerIndex: 0 });
   assert.equal(state.phase, 'BIDDING');
   assert.equal(state.currentPlayerIndex, 0);
   assert.equal(state.players.length, 4);
@@ -29,13 +29,11 @@ test('initial state deals 13 cards to each of 4 players and starts in BIDDING wi
     assert.equal(p.hand.length, 13);
     assert.equal(p.tricksWon, 0);
   }
-  assert.ok(state.timeControl);
-  assert.equal(state.timeControl.mainTimeMs, 90000);
-  assert.equal(state.timeControl.incrementMs, 10000);
+  assert.equal('timeControl' in state, false);
 });
 
 test('first bidder must bid and cannot Pass on opening', () => {
-  const state = createInitialGameState(mockPlayers, { firstPlayerIndex: 0, unlimitedTime: true });
+  const state = createInitialGameState(mockPlayers, { firstPlayerIndex: 0 });
   const passAttempt = processAction(state, 0, { type: 'PASS' });
   assert.ok(passAttempt.error);
   assert.equal(state.currentPlayerIndex, 0);
@@ -47,7 +45,7 @@ test('first bidder must bid and cannot Pass on opening', () => {
 });
 
 test('bidding enforces strictly higher bids and transitions to CALL_PARTNER after 3 consecutive passes', () => {
-  const state = createInitialGameState(mockPlayers, { firstPlayerIndex: 0, unlimitedTime: true });
+  const state = createInitialGameState(mockPlayers, { firstPlayerIndex: 0 });
   assert.equal(processAction(state, 0, { type: 'BID', level: 2, strain: 2 }).ok, true);
 
   assert.ok(processAction(state, 1, { type: 'BID', level: 2, strain: 2 }).error);
@@ -67,7 +65,7 @@ test('bidding enforces strictly higher bids and transitions to CALL_PARTNER afte
 });
 
 test('Lord cannot call own card (no 1v3) and always leads the first trick even in trump contracts', () => {
-  const state = createInitialGameState(mockPlayers, { firstPlayerIndex: 2, unlimitedTime: true });
+  const state = createInitialGameState(mockPlayers, { firstPlayerIndex: 2 });
   processAction(state, 2, { type: 'BID', level: 1, strain: 1 });
   processAction(state, 3, { type: 'PASS' });
   processAction(state, 0, { type: 'PASS' });
@@ -94,7 +92,7 @@ test('Lord cannot call own card (no 1v3) and always leads the first trick even i
 });
 
 test('trump broken rule and early victory reveal +1 / -1 scoring work accurately', () => {
-  const state = createInitialGameState(mockPlayers, { firstPlayerIndex: 0, unlimitedTime: true });
+  const state = createInitialGameState(mockPlayers, { firstPlayerIndex: 0 });
   state.phase = 'PLAYING';
   state.declarerIndex = 0;
   state.partnerIndex = 2;
@@ -136,7 +134,7 @@ test('trump broken rule and early victory reveal +1 / -1 scoring work accurately
 
 test('replay recorder and replayEngine reconstruct full game frames accurately', async () => {
   replayStore.reset();
-  const state = createInitialGameState(mockPlayers, { firstPlayerIndex: 0, unlimitedTime: true });
+  const state = createInitialGameState(mockPlayers, { firstPlayerIndex: 0 });
   const room = { id: 'game-1725280000000-test', createdAt: 1725280000000, state };
   replayRecorder.begin(room);
 
