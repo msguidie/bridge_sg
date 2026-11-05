@@ -9,7 +9,6 @@ export interface ReplayPlayer {
   index: number;
   playing: boolean;
   speed: ReplaySpeed;
-  perspective: number;
   atEnd: boolean;
   frameCount: number;
   stepForward: () => void;
@@ -17,7 +16,6 @@ export interface ReplayPlayer {
   seek: (index: number) => void;
   togglePlay: () => void;
   cycleSpeed: () => void;
-  setPerspective: (seat: number) => void;
 }
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -27,11 +25,10 @@ function isTypingTarget(target: EventTarget | null): boolean {
   return target.isContentEditable;
 }
 
-export function useReplayPlayer(frameCount: number, initialPerspective: number): ReplayPlayer {
+export function useReplayPlayer(frameCount: number): ReplayPlayer {
   const [index, setIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState<ReplaySpeed>(1);
-  const [perspective, setPerspective] = useState(initialPerspective);
 
   const lastIndex = Math.max(0, frameCount - 1);
   const atEnd = index >= lastIndex;
@@ -109,7 +106,6 @@ export function useReplayPlayer(frameCount: number, initialPerspective: number):
     index: Math.min(index, lastIndex),
     playing,
     speed,
-    perspective,
     atEnd,
     frameCount,
     stepForward,
@@ -117,6 +113,5 @@ export function useReplayPlayer(frameCount: number, initialPerspective: number):
     seek,
     togglePlay,
     cycleSpeed,
-    setPerspective,
   };
 }

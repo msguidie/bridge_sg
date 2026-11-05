@@ -3,15 +3,7 @@ import useGameStore from '../store/gameStore';
 import Avatar from './Avatar';
 
 export default function WaitingRoom() {
-  const {
-    lobbyPlayers,
-    lobbyUnlimitedTime,
-    myAccount,
-    toggleReady,
-    toggleGoFirst,
-    toggleUnlimitedTime,
-    leaveLobby,
-  } = useGameStore();
+  const { lobbyPlayers, myAccount, toggleReady, leaveLobby } = useGameStore();
 
   const me = lobbyPlayers.find(p => p.username === myAccount?.username);
   const allReady = lobbyPlayers.length === 4 && lobbyPlayers.every(p => p.ready);
@@ -25,36 +17,6 @@ export default function WaitingRoom() {
           <span className="text-xs font-mono-num text-emerald-200/70">
             {lobbyPlayers.length} / 4 players
           </span>
-        </div>
-
-        {/* I WANT TO GO FIRST switch */}
-        <div className="flex items-center justify-between gap-3 rounded-xl bg-[#0b3527]/75 border border-amber-400/15 px-3.5 py-2">
-          <div className="min-w-0">
-            <div className="text-xs font-semibold text-amber-100">I WANT TO GO FIRST</div>
-            <div className="text-[10px] leading-tight text-emerald-200/60">
-              Volunteers resolved randomly; first bidder must make an opening bid
-            </div>
-          </div>
-          <Switch
-            checked={!!me?.wantsFirst}
-            onClick={toggleGoFirst}
-            label="Toggle first-player preference"
-          />
-        </div>
-
-        {/* Unlimited Time switch (default: 1.5 min + 10 sec) */}
-        <div className="flex items-center justify-between gap-3 rounded-xl bg-[#0b3527]/75 border border-amber-400/15 px-3.5 py-2">
-          <div className="min-w-0">
-            <div className="text-xs font-semibold text-amber-100">Unlimited Time</div>
-            <div className="text-[10px] leading-tight text-emerald-200/60">
-              Otherwise each player uses a 1.5 min + 10 sec clock (including bidding)
-            </div>
-          </div>
-          <Switch
-            checked={lobbyUnlimitedTime}
-            onClick={toggleUnlimitedTime}
-            label="Toggle unlimited time"
-          />
         </div>
 
         {/* 4 Player slots */}
@@ -75,9 +37,6 @@ export default function WaitingRoom() {
                 </span>
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">
-                {p.wantsFirst && (
-                  <span className="text-[10px] font-semibold text-amber-300">First</span>
-                )}
                 <span
                   className={`text-xs font-medium ${
                     p.ready ? 'text-emerald-300' : 'text-emerald-200/45'
@@ -130,38 +89,5 @@ export default function WaitingRoom() {
         </div>
       </div>
     </div>
-  );
-}
-
-function Switch({
-  checked,
-  onClick,
-  label,
-}: {
-  checked: boolean;
-  onClick: () => void;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-label={label}
-      aria-checked={checked}
-      onClick={onClick}
-      className="w-11 h-7 flex-shrink-0 flex items-center justify-center cursor-pointer touch-manipulation"
-    >
-      <span
-        className={`relative block w-10 h-5 rounded-full transition-colors ${
-          checked ? 'bg-amber-500' : 'bg-emerald-950 border border-emerald-700/60'
-        }`}
-      >
-        <span
-          className={`absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${
-            checked ? 'translate-x-5' : 'translate-x-0'
-          }`}
-        />
-      </span>
-    </button>
   );
 }

@@ -19,7 +19,6 @@ import type {
   PlayerView,
   Strain,
   Suit,
-  TimeControlState,
 } from '../types';
 import {
   STRAIN_SYMBOLS,
@@ -61,7 +60,7 @@ export default function GameBoard() {
   const [showResignConfirm, setShowResignConfirm] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  // Clock synchronization (also drives the disconnect countdown)
+  // Server-synced "now", only needed for a disconnected seat's countdown
   const [clockNow, setClockNow] = useState(Date.now());
   const [serverClockOffset, setServerClockOffset] = useState(0);
 
@@ -102,17 +101,16 @@ export default function GameBoard() {
     return () => document.removeEventListener('fullscreenchange', handler);
   }, []);
 
-  const serverStamp = gameState?.serverNow ?? gameState?.timeControl?.serverNow;
+  const serverStamp = gameState?.serverNow;
   useEffect(() => {
     if (serverStamp !== undefined) setServerClockOffset(serverStamp - Date.now());
   }, [serverStamp]);
 
-  const needsTick =
-    !!gameState?.timeControl || !!gameState?.players.some(p => p.disconnectDeadline);
+  const needsTick = !!gameState?.players.some(p => p.disconnectDeadline);
   useEffect(() => {
     if (!needsTick) return;
     setClockNow(Date.now());
-    const interval = setInterval(() => setClockNow(Date.now()), 250);
+    const interval = setInterval(() => setClockNow(Date.now()), 500);
     return () => clearInterval(interval);
   }, [needsTick]);
 
@@ -290,12 +288,12 @@ export default function GameBoard() {
   const rightIdx = (playerIndex + 3) % 4;
 
   const effectiveServerNow = clockNow + serverClockOffset;
-  const activeClockSeat =
+  const activeSeat =
     gameState.phase !== 'GAME_OVER' && !gameState.trickPendingResolve
       ? gameState.currentPlayerIndex
       : -1;
 
-  // During PLAYING phase, avatars disappear and only ID + tricksWon (starting from 0) + clock are shown
+  // During PLAYING phase, avatars disappear and only ID + tricksWon (starting from 0) are shown
   const isPlayingPhase = gameState.phase === 'PLAYING' || gameState.phase === 'GAME_OVER';
   const bidding = gameState.phase === 'BIDDING';
   const standingBid = standingBidIndex(gameState.bidHistory);
@@ -306,12 +304,11 @@ export default function GameBoard() {
     const isLord = gameState.declarerIndex === idx;
     return {
       player,
-      isTurn: activeClockSeat === idx,
+      isTurn: activeSeat === idx,
       roleTag: isLord ? '主公' : null,
       calledCard: isLord ? gameState.calledCard : null,
       showAvatar: !isPlayingPhase,
       showTricks: isPlayingPhase,
-      clock: getPlayerClock(gameState.timeControl, idx, activeClockSeat, effectiveServerNow),
       offlineLabel: offline
         ? player.disconnectDeadline
           ? `断线 ${formatMainTime(player.disconnectDeadline - effectiveServerNow)}`
@@ -944,23 +941,6 @@ function ConfirmModal({
       </motion.div>
     </motion.div>
   );
-}
-
-function getPlayerClock(
-  timeControl: TimeControlState | null,
-  playerIndex: number,
-  currentPlayerIndex: number,
-  now: number,
-): { label: string; urgent: boolean } | null {
-  if (!timeControl) return null;
-  const storedTime = Math.max(0, timeControl.playerTimeRemainingMs[playerIndex] ?? 0);
-  const isActive = playerIndex === currentPlayerIndex;
-  if (isActive && timeControl.activeSince !== null) {
-    const elapsed = Math.max(0, now - timeControl.activeSince);
-    const remaining = Math.max(0, storedTime - elapsed);
-    return { label: formatMainTime(remaining), urgent: remaining <= 10_000 };
-  }
-  return { label: formatMainTime(storedTime), urgent: false };
 }
 
 function formatMainTime(milliseconds: number): string {

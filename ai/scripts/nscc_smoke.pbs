@@ -1,0 +1,22 @@
+#!/bin/bash
+# 30-minute check on ONE GPU before the 1-day run: unit tests (incl. the JS
+# engine cross-check), 6 min of real training, then a resume to 12 min.
+#     cd ai && qsub -P <project> scripts/nscc_smoke.pbs
+# Read bridge-smoke.o<jobid> afterwards: tests must pass, the "k/s" number is
+# the per-GPU throughput, and the second run must say "resumed at iteration".
+#PBS -q ai
+#PBS -l select=1:ngpus=1:ncpus=16:mem=124gb
+#PBS -l walltime=00:30:00
+#PBS -N bridge-smoke
+#PBS -j oe
+set -o pipefail
+cd "${PBS_O_WORKDIR:-$PWD}" || exit 1
+[ -d bridge_ai ] || cd ai || exit 1
+. scripts/env.sh
+
+python -m pytest -q || { echo "TESTS FAILED"; exit 1; }
+rm -rf runs/smoke
+python -m bridge_ai.train --preset base --run-dir runs/smoke --set train_hours=0.1 \
+    --set snapshot_every_min=2 --set ckpt_every_min=2 --set arena_every_min=3 --set arena_deals=512
+python -m bridge_ai.train --preset base --run-dir runs/smoke --set train_hours=0.2
+python -m bridge_ai.report runs/smoke

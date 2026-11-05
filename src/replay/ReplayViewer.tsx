@@ -4,7 +4,7 @@ import { Gauge, Pause, Play, SkipBack, SkipForward, X } from 'lucide-react';
 import useGameStore from '../store/gameStore';
 import {
   ContractBadge,
-  HandRow,
+  HandText,
   Seat,
   TableLayout,
   TrickArea,
@@ -19,7 +19,6 @@ import { useReplayPlayer } from './useReplayPlayer';
 import { STRAIN_SYMBOLS, SUIT_SYMBOLS, formatRank } from '../constants';
 
 const ROLE_LABELS = { LORD: '主公', LOYALIST: '忠臣', REBEL: '反贼' } as const;
-const NO_CARDS = new Set<number>();
 
 function frameCaption(frame: ReplayFrame, names: string[]): string {
   if (!frame || frame.i === 0) return '发牌完毕 · 等待首家叫牌';
@@ -55,7 +54,8 @@ function frameCaption(frame: ReplayFrame, names: string[]): string {
   }
 }
 
-// Watch from your own seat when you played in this game, otherwise from the Lord's.
+// The bottom seat: your own when you played in this game, otherwise the Lord's.
+// All four hands are open, so there is nothing to switch.
 function initialPerspective(replay: ReplayData, username?: string): number {
   const mine = replay.meta.players.findIndex(p => p.username === username);
   if (mine >= 0) return mine;
@@ -101,17 +101,16 @@ function ReplayStage({ replay, onExit }: { replay: ReplayData; onExit: () => voi
   const myName = useGameStore(s => s.myAccount?.username);
   const metrics = useTableMetrics();
   const frames = replay.frames;
-  const player = useReplayPlayer(frames.length, initialPerspective(replay, myName));
+  const player = useReplayPlayer(frames.length);
+  const [perspective] = useState(() => initialPerspective(replay, myName));
   const frame = frames[Math.min(player.index, frames.length - 1)];
   const gameState = frame.state;
-  const perspective = Math.min(player.perspective, 3);
   const [overlayHidden, setOverlayHidden] = useState(false);
 
   useEffect(() => {
     if (gameState.phase !== 'GAME_OVER') setOverlayHidden(false);
   }, [gameState.phase]);
 
-  const me = gameState.players[perspective];
   const leftIdx = (perspective + 1) % 4;
   const topIdx = (perspective + 2) % 4;
   const rightIdx = (perspective + 3) % 4;
@@ -134,7 +133,6 @@ function ReplayStage({ replay, onExit }: { replay: ReplayData; onExit: () => voi
       calledCard: isLord ? gameState.calledCard : null,
       showAvatar: !isPlayingPhase,
       showTricks: isPlayingPhase,
-      clock: null,
       offlineLabel: null,
       calls: seatCalls(gameState.bidHistory, idx),
       callPending: bidding && gameState.currentPlayerIndex === idx,
@@ -144,6 +142,9 @@ function ReplayStage({ replay, onExit }: { replay: ReplayData; onExit: () => voi
   };
   const topInfo = seatInfo(topIdx);
   const selfInfo = seatInfo(perspective);
+  const openHand = (seat: number, layout: 'line' | 'stack') => (
+    <HandText cards={gameState.players[seat].hand} layout={layout} metrics={metrics} />
+  );
 
   // ── Playback controls (wrap onto a second line on narrow screens) ──
   const controlButton =
@@ -193,24 +194,6 @@ function ReplayStage({ replay, onExit }: { replay: ReplayData; onExit: () => voi
           {player.speed}&times;
         </button>
       </div>
-
-      {/* Perspective Switcher */}
-      <div className="flex items-center gap-0.5 pl-1 border-l border-amber-400/20 flex-shrink-0">
-        {gameState.players.map((p, idx) => (
-          <button
-            key={p.username}
-            onClick={() => player.setPerspective(idx)}
-            title={`Watch as ${p.username}`}
-            className={`px-1.5 h-7 rounded text-[10px] font-semibold transition cursor-pointer ${
-              idx === perspective
-                ? 'bg-amber-500 text-[#062118]'
-                : 'bg-[#0b3527]/70 text-emerald-200/70 hover:text-amber-100'
-            }`}
-          >
-            {p.username.slice(0, 4)}
-          </button>
-        ))}
-      </div>
     </div>
   );
 
@@ -236,12 +219,19 @@ function ReplayStage({ replay, onExit }: { replay: ReplayData; onExit: () => voi
       metrics={metrics}
       header={header}
       topLeft={<ContractBadge contract={gameState.contract} />}
-      top={<Seat info={topInfo} side="top" metrics={metrics} />}
-      left={<Seat info={seatInfo(leftIdx)} side="left" metrics={metrics} />}
-      right={<Seat info={seatInfo(rightIdx)} side="right" metrics={metrics} />}
+      top={
+        <Seat
+          info={topInfo}
+          side="top"
+          metrics={metrics}
+          below={openHand(topIdx, metrics.portrait ? 'stack' : 'line')}
+        />
+      }
+      left={<Seat info={seatInfo(leftIdx)} side="left" metrics={metrics} below={openHand(leftIdx, 'stack')} />}
+      right={<Seat info={seatInfo(rightIdx)} side="right" metrics={metrics} below={openHand(rightIdx, 'stack')} />}
       center={center}
       self={<Seat info={selfInfo} side="self" metrics={metrics} />}
-      hand={<HandRow cards={me.hand} metrics={metrics} playableIds={NO_CARDS} dimmedIds={NO_CARDS} />}
+      hand={openHand(perspective, 'line')}
       insetTop={metrics.portrait ? 0 : callsOverhang(topInfo, metrics.bidRows.top, metrics)}
       insetBottom={callsOverhang(selfInfo, metrics.bidRows.self, metrics)}
     >

@@ -7,3 +7,9 @@ coverage/
 .env*
 !.env.example
 server/data/
+# Python / AI training
+__pycache__/
+*.pyc
+.pytest_cache/
+ai/runs/
+ai/exports/

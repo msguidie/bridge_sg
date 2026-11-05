@@ -1,0 +1,11 @@
+# Environment for ai/ (Python >= 3.10).  scripts/nscc_setup.sh does all of this on NSCC.
+#
+# 1) torch FIRST, from the CUDA 12.8 index: NSCC ASPIRE 2A runs a 12.8 driver and the
+#    default PyPI wheel (newer CUDA) would make torch.cuda.is_available() False there:
+#        pip install torch --index-url https://download.pytorch.org/whl/cu128
+#    (a CPU-only machine: pip install torch --index-url https://download.pytorch.org/whl/cpu)
+# 2) the rest:
+#        pip install -r requirements.txt
+torch>=2.7
+numpy>=1.26
+pytest>=8.0

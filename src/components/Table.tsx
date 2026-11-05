@@ -2,8 +2,8 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 're
 import { motion, AnimatePresence } from 'framer-motion';
 import Avatar from './Avatar';
 import CardView from './CardView';
-import type { BidRecord, Card, Contract, CurrentTrick, PlayerView } from '../types';
-import { STRAIN_SYMBOLS, isRedSuit } from '../constants';
+import type { BidRecord, Card, Contract, CurrentTrick, PlayerView, Suit } from '../types';
+import { STRAIN_SYMBOLS, SUIT_SYMBOLS, formatRank, isRedSuit } from '../constants';
 
 // Shared by the live table (GameBoard) and the replay viewer.
 
@@ -96,7 +96,7 @@ export function useElementWidth(ref: React.RefObject<HTMLElement | null>): numbe
 }
 
 // ═══════════════════════════════════════════════════════════
-// Seats: plaque (name, role, called card, tricks, clock) + that player's calls
+// Seats: plaque (name, role, called card, tricks) + that player's calls
 // ═══════════════════════════════════════════════════════════
 
 export interface SeatCall {
@@ -127,7 +127,6 @@ export interface SeatInfo {
   calledCard: Card | null; // set on the Lord's seat for the rest of the game
   showAvatar: boolean;
   showTricks: boolean;
-  clock: { label: string; urgent: boolean } | null;
   offlineLabel: string | null;
   calls: SeatCall[];
   callPending: boolean; // this seat calls next
@@ -215,7 +214,7 @@ function SeatPlaque({
   variant: 'row' | 'stack';
   metrics: TableMetrics;
 }) {
-  const { player, isTurn, roleTag, calledCard, showAvatar, showTricks, clock, offlineLabel } = info;
+  const { player, isTurn, roleTag, calledCard, showAvatar, showTricks, offlineLabel } = info;
   const c = metrics.compact;
   const nameMax = variant === 'stack' ? (metrics.portrait ? 64 : c ? 78 : 110) : c ? 96 : 130;
 
@@ -244,21 +243,9 @@ function SeatPlaque({
       <span className="text-[10px] text-emerald-200/60">墩</span>
     </span>
   );
-  const status = offlineLabel ? (
+  const status = offlineLabel && (
     <span className="text-[10px] font-mono-num font-bold text-rose-300 flex-shrink-0">{offlineLabel}</span>
-  ) : clock ? (
-    <span
-      className={`${c ? 'text-[11px]' : 'text-xs'} font-mono-num flex-shrink-0 ${
-        clock.urgent
-          ? 'text-rose-400 font-bold animate-pulse'
-          : isTurn
-            ? 'text-amber-200 font-semibold'
-            : 'text-emerald-200/55'
-      }`}
-    >
-      {clock.label}
-    </span>
-  ) : null;
+  );
   const called = calledCard && (
     <span className="flex-shrink-0" title="主公叫的队友牌（忠臣牌）">
       <CardView card={calledCard} variant="mini" width={c ? 19 : 23} height={c ? 26 : 32} />
@@ -303,14 +290,17 @@ function SeatPlaque({
   );
 }
 
+// `below` (the replay's open hand) sits directly under the plaque.
 export function Seat({
   info,
   side,
   metrics,
+  below,
 }: {
   info: SeatInfo;
   side: 'top' | 'left' | 'right' | 'self';
   metrics: TableMetrics;
+  below?: React.ReactNode;
 }) {
   const { portrait, bidRows, chipW } = metrics;
 
@@ -319,6 +309,7 @@ export function Seat({
     return (
       <div className="flex flex-col items-center gap-1 min-w-0 max-w-full">
         <SeatPlaque info={info} variant="stack" metrics={metrics} />
+        {below}
         <BidColumn info={info} rows={bidRows.side} metrics={metrics} />
       </div>
     );
@@ -330,8 +321,12 @@ export function Seat({
     const cols = Math.ceil(callCount(info) / bidRows.side);
     const reserve = cols > 0 ? cols * (chipW + 2) + 6 : 0;
     return (
-      <div className="relative" style={side === 'left' ? { paddingRight: reserve } : { paddingLeft: reserve }}>
+      <div
+        className={`relative flex flex-col gap-1 ${side === 'left' ? 'items-start' : 'items-end'}`}
+        style={side === 'left' ? { paddingRight: reserve } : { paddingLeft: reserve }}
+      >
         <SeatPlaque info={info} variant="stack" metrics={metrics} />
+        {below}
         <div className="absolute top-0" style={side === 'left' ? { right: 0 } : { left: 0 }}>
           <BidColumn info={info} rows={bidRows.side} metrics={metrics} reverse={side === 'right'} />
         </div>
@@ -339,15 +334,56 @@ export function Seat({
     );
   }
 
-  // Top (landscape) hangs its calls down beside the plaque; self grows them up
-  // from the plaque's bottom edge. Either way round 1 stays on top.
+  // Top (landscape) hangs its calls down beside the plaque (and its open hand,
+  // if any); self grows them up from the plaque's bottom edge. Either way
+  // round 1 stays on top.
   const rows = side === 'self' ? bidRows.self : bidRows.top;
   return (
-    <div className="relative inline-flex max-w-full">
+    <div className="relative inline-flex flex-col items-center gap-1 max-w-full">
       <SeatPlaque info={info} variant="row" metrics={metrics} />
+      {below}
       <div className="absolute" style={{ left: 'calc(100% + 6px)', ...(side === 'self' ? { bottom: 0 } : { top: 0 }) }}>
         <BidColumn info={info} rows={rows} metrics={metrics} />
       </div>
+    </div>
+  );
+}
+
+// A hand written out the way bridge diagrams do (♠ A 10 2 / ♥ …), so the replay
+// can show all four hands even on a phone.
+const DIAGRAM_SUITS: Suit[] = [3, 2, 1, 0];
+
+export function HandText({
+  cards,
+  layout,
+  metrics,
+}: {
+  cards: Card[];
+  layout: 'line' | 'stack';
+  metrics: TableMetrics;
+}) {
+  const size = metrics.compact || metrics.portrait ? 'text-[11px]' : 'text-xs sm:text-sm';
+  return (
+    <div
+      className={`font-mono-num leading-snug rounded-lg bg-[#051c14]/75 border border-amber-400/15 px-2 py-1 ${size} ${
+        layout === 'line' ? 'flex flex-wrap justify-center gap-x-3' : 'flex flex-col'
+      }`}
+    >
+      {DIAGRAM_SUITS.map(suit => {
+        const ranks = cards
+          .filter(c => c.suit === suit)
+          .sort((a, b) => b.rank - a.rank)
+          .map(c => formatRank(c.rank));
+        return (
+          <span key={suit} className="whitespace-nowrap">
+            <span className={isRedSuit(suit) ? 'text-rose-400' : 'text-amber-100'}>{SUIT_SYMBOLS[suit]}</span>
+            <span className={ranks.length ? 'text-amber-50' : 'text-emerald-200/40'}>
+              {' '}
+              {ranks.length ? ranks.join(' ') : '—'}
+            </span>
+          </span>
+        );
+      })}
     </div>
   );
 }
